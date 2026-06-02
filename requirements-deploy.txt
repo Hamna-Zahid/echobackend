@@ -1,0 +1,41 @@
+# ── EchoCoach backend — PRODUCTION/DEPLOY runtime deps ────────────────────────
+# This is the dependency set the deployed container installs. It deliberately
+# EXCLUDES the heavy ML stack (torch, transformers, kokoro, librosa, soundfile)
+# because:
+#   • Live conversation only needs: Gemini/Groq (LLM) + Groq Whisper (STT) +
+#     edge-tts→miniaudio (TTS). All lightweight, all cloud or pure-Python.
+#   • The post-session Wav2Vec2 phoneme report imports torch lazily and is wrapped
+#     in try/except — it simply no-ops if torch isn't present, so the app runs fine.
+# Result: a ~150 MB image that builds in ~1 min instead of a 2.5 GB / 10-min build.
+#
+# For full local dev WITH phoneme analysis, use requirements.txt instead.
+
+# Web framework
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+python-dotenv>=1.0.1
+pydantic>=2.10.0
+pydantic-settings>=2.5.0
+email-validator>=2.0.0
+python-multipart>=0.0.9
+aiofiles>=23.2.1
+websockets>=12.0
+
+# Database & state (both are cloud — Supabase + Upstash Redis)
+supabase>=2.4.6
+redis>=5.0.4
+python-jose[cryptography]>=3.3.0
+httpx>=0.27.0
+
+# LLM (cloud, free tier)
+google-genai>=1.0.0
+groq>=0.9.0
+
+# TTS — edge-tts (free, no key) + miniaudio for MP3→PCM F32LE conversion.
+# miniaudio is REQUIRED: without it the audio falls back to a broken path and
+# the client receives silence.
+edge-tts>=6.1.9
+miniaudio>=1.58
+
+# numpy — used by the post-session phoneme module (imported lazily). Small.
+numpy>=1.26

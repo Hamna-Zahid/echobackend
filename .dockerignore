@@ -1,0 +1,19 @@
+# Never ship the local virtualenv (huge) or secrets — env vars come from the
+# platform dashboard, not a baked-in .env file.
+venv/
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.env
+.env.*
+!.env.example
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+eval/
+start.bat
+start.ps1
+*.md

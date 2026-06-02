@@ -1,0 +1,13 @@
+# Railway service config for the EchoCoach backend.
+# This is a standalone repo with the Dockerfile at the root, so leave the
+# Railway service "Root Directory" at its default (the repo root).
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Start command comes from the Dockerfile CMD.
+healthcheckPath = "/health"
+healthcheckTimeout = 100
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
