@@ -109,3 +109,13 @@ app.include_router(ws.router,       tags=["websocket"])
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "EchoCoach API"}
+
+
+if __name__ == "__main__":
+    # Production entrypoint. Reading PORT in Python (not via shell $PORT) makes this
+    # robust to platforms that run the start command in exec form — where "$PORT"
+    # would NOT be expanded by a shell. Start with: python main.py
+    import uvicorn
+
+    port = int(os.environ.get("PORT", "8000"))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)

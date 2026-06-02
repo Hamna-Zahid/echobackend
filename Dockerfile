@@ -20,5 +20,6 @@ COPY . .
 ENV PORT=8000
 EXPOSE 8000
 
-# Shell form so ${PORT} expands at runtime.
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Start via Python so PORT is read from the environment in-process. This is exec-form
+# safe — it works even if a platform overrides the start command without a shell.
+CMD ["python", "main.py"]
