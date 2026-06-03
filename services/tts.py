@@ -156,10 +156,17 @@ async def _edge_tts(
         voice = EDGE_VOICES.get(accent, EDGE_VOICES["american"])
         communicator = edge_tts.Communicate(text, voice)
 
-        mp3_chunks = []
-        async for item in communicator.stream():
-            if item["type"] == "audio":
-                mp3_chunks.append(item["data"])
+        # edge-tts hits an unofficial Microsoft endpoint that can occasionally stall.
+        # Cap the whole fetch so one slow turn can't hang for 25s+ — fail fast and let
+        # the caller move on (the session stays usable, text is already shown).
+        async def _collect():
+            chunks = []
+            async for item in communicator.stream():
+                if item["type"] == "audio":
+                    chunks.append(item["data"])
+            return chunks
+
+        mp3_chunks = await asyncio.wait_for(_collect(), timeout=12.0)
 
         if not mp3_chunks:
             yield b""

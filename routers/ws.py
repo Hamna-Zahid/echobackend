@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import time
+import traceback
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -552,53 +553,69 @@ async def websocket_session(
         await websocket.close()
         return
 
-    # Step 3: Load top recurring errors
-    errors_res = (
-        supabase.table("errors")
-        .select("error_type, original_utterance, recurrence_count")
-        .eq("user_id", user_id)
-        .eq("resolved", False)
-        .order("recurrence_count", desc=True)
-        .limit(3)
-        .execute()
-    )
-    top_errors = errors_res.data or []
+    # Steps 3-6: Load context + initialise Redis session state.
+    # Wrapped so a backend dependency failure (e.g. REDIS_URL not set on the host,
+    # Supabase outage) surfaces as a clear client error + server log instead of an
+    # abnormal 1006 close that makes the client reconnect-loop forever.
+    try:
+        # Step 3: Load top recurring errors
+        errors_res = (
+            supabase.table("errors")
+            .select("error_type, original_utterance, recurrence_count")
+            .eq("user_id", user_id)
+            .eq("resolved", False)
+            .order("recurrence_count", desc=True)
+            .limit(3)
+            .execute()
+        )
+        top_errors = errors_res.data or []
 
-    # Step 4: Load user profile
-    user_res = supabase.table("users").select("*").eq("id", user_id).single().execute()
-    user_data = user_res.data or {}
+        # Step 4: Load user profile
+        user_res = supabase.table("users").select("*").eq("id", user_id).single().execute()
+        user_data = user_res.data or {}
 
-    # Step 5: Load user memory (persistent learning context across sessions)
-    user_memory = load_user_memory(user_id)
+        # Step 5: Load user memory (persistent learning context across sessions)
+        user_memory = load_user_memory(user_id)
 
-    # Step 5b: If this session is the next step in the learner's plan, load its
-    # focus so the whole conversation steers toward that plan session's topic.
-    plan_focus = _get_plan_focus(supabase, user_id, mode)
+        # Step 5b: If this session is the next step in the learner's plan, load its
+        # focus so the whole conversation steers toward that plan session's topic.
+        plan_focus = _get_plan_focus(supabase, user_id, mode)
 
-    # Step 6: Initialize Redis session state
-    state = {
-        "user_id": user_id,
-        "mode": mode,
-        "is_diagnostic_complete": False,
-        "diagnostic_turn_count": 0,
-        "phoneme_unit": 0,               # accent mode: current phoneme curriculum unit
-        "current_topic": user_memory.get("preferred_topics", ["career"])[0] if user_memory.get("preferred_topics") else "career",
-        "silence_timer_start": None,
-        "error_count_this_session": 0,
-        "cefr_level": user_data.get("cefr_level"),
-        "top_recurring_errors": top_errors,
-        "tts_is_speaking": False,
-        "session_db_id": session_db_id,
-        "preferred_accent": accent or user_data.get("preferred_accent", "american"),
-        "conversation_history": [],
-        "session_transcript": "",
-        "session_started_at": time.time(),
-        "user_memory": user_memory,
-        "plan_focus": plan_focus,        # plan session context, injected into the prompt each turn
-        # Audio buffer for post-session Wav2Vec2 analysis (stores {audio_bytes, transcript, ts})
-        # Not stored in Redis (too large) — kept in-memory for this connection lifetime
-    }
-    await set_session_state(session_id, state)
+        # Step 6: Initialize Redis session state
+        state = {
+            "user_id": user_id,
+            "mode": mode,
+            "is_diagnostic_complete": False,
+            "diagnostic_turn_count": 0,
+            "phoneme_unit": 0,               # accent mode: current phoneme curriculum unit
+            "current_topic": user_memory.get("preferred_topics", ["career"])[0] if user_memory.get("preferred_topics") else "career",
+            "silence_timer_start": None,
+            "error_count_this_session": 0,
+            "cefr_level": user_data.get("cefr_level"),
+            "top_recurring_errors": top_errors,
+            "tts_is_speaking": False,
+            "session_db_id": session_db_id,
+            "preferred_accent": accent or user_data.get("preferred_accent", "american"),
+            "conversation_history": [],
+            "session_transcript": "",
+            "session_started_at": time.time(),
+            "user_memory": user_memory,
+            "plan_focus": plan_focus,        # plan session context, injected into the prompt each turn
+            # Audio buffer for post-session Wav2Vec2 analysis (stores {audio_bytes, transcript, ts})
+            # Not stored in Redis (too large) — kept in-memory for this connection lifetime
+        }
+        await set_session_state(session_id, state)
+    except Exception as e:
+        # Log the full traceback to the server (visible in Railway logs) and tell
+        # the client exactly what failed so it can stop and show the error.
+        print("[ws] FATAL session setup error:", repr(e))
+        traceback.print_exc()
+        await send_json(websocket, {
+            "type": "fatal_error",
+            "message": f"Session setup failed: {type(e).__name__}: {str(e)[:200]}",
+        })
+        await websocket.close(code=1011, reason="Session setup failed")
+        return
 
     # In-memory audio segments buffer for post-session phoneme analysis
     # Each entry: {"audio_bytes": bytes, "expected_text": str, "timestamp": float}
@@ -637,11 +654,19 @@ async def websocket_session(
     state["conversation_history"].append({"role": "assistant", "content": greeting_text})
     await set_session_state(session_id, state)
 
-    async for audio_chunk in stream_tts(greeting_text, accent=state["preferred_accent"]):
-        await send_json(websocket, {
-            "type": "tts_chunk",
-            "data": base64.b64encode(audio_chunk).decode("utf-8"),
-        })
+    # Greeting audio. If TTS fails (network to the TTS provider, etc.) we must NOT
+    # kill the session — the user can still talk and the AI replies per-turn. Send
+    # the greeting text so the UI can show it, then always emit tts_done.
+    await send_json(websocket, {"type": "assistant_text", "text": greeting_text})
+    try:
+        async for audio_chunk in stream_tts(greeting_text, accent=state["preferred_accent"]):
+            await send_json(websocket, {
+                "type": "tts_chunk",
+                "data": base64.b64encode(audio_chunk).decode("utf-8"),
+            })
+    except Exception as e:
+        print("[ws] greeting TTS failed (continuing):", repr(e))
+        traceback.print_exc()
 
     await send_json(websocket, {"type": "tts_done"})
     state["tts_is_speaking"] = False
