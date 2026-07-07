@@ -186,9 +186,12 @@ async def websocket_session(
                 full += token
                 if any(sentence_buf.rstrip().endswith(e) for e in SENTENCE_ENDS) and len(sentence_buf.strip()) >= MIN_SENTENCE_LEN:
                     chunk, sentence_buf = sentence_buf.strip(), ""
+                    # Live caption: the client shows the AI's words as it speaks.
+                    await send_json(websocket, {"type": "ai_text", "text": chunk})
                     if not await _pipe_tts(chunk):
                         break
             if speaking["on"] and sentence_buf.strip():
+                await send_json(websocket, {"type": "ai_text", "text": sentence_buf.strip()})
                 await _pipe_tts(sentence_buf.strip())
             if speaking["on"]:
                 await send_json(websocket, {"type": "tts_done"})
@@ -268,6 +271,7 @@ async def websocket_session(
                 speaking["on"] = True
                 try:
                     text = NUDGES.get(mode, NUDGES["conversation"])
+                    await send_json(websocket, {"type": "ai_text", "text": text})
                     async for chunk in stream_tts(text, accent=accent):
                         if not speaking["on"]:
                             break
@@ -403,6 +407,9 @@ async def websocket_session(
                 transcript = stt.text.strip()
                 if not transcript:
                     continue
+
+                # Show the user their own recognized words in the live transcript.
+                await send_json(websocket, {"type": "user_text", "text": transcript})
 
                 # Accumulate delivery metrics.
                 metrics_acc["words"] += len(transcript.split())
