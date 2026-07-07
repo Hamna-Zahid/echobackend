@@ -83,15 +83,28 @@ async def get_recurring_errors(user=Depends(get_current_user)):
 async def get_progress(user=Depends(get_current_user)):
     supabase = get_supabase()
 
-    # Fetch up to 90 sessions for streak calculation + recent display
-    sessions_res = (
-        supabase.table("sessions")
-        .select("id, overall_score, wpm, filler_count, started_at, mode, duration_seconds")
-        .eq("user_id", user["id"])
-        .order("started_at", desc=True)
-        .limit(90)
-        .execute()
-    )
+    # Fetch up to 90 sessions for streak calculation + recent display.
+    # Falls back to the original columns if the add_admin.sql migration
+    # (overall_score/wpm/filler_count) hasn't been applied yet — the home
+    # screen must never hard-fail because of a pending migration.
+    try:
+        sessions_res = (
+            supabase.table("sessions")
+            .select("id, overall_score, wpm, filler_count, started_at, mode, duration_seconds")
+            .eq("user_id", user["id"])
+            .order("started_at", desc=True)
+            .limit(90)
+            .execute()
+        )
+    except Exception:
+        sessions_res = (
+            supabase.table("sessions")
+            .select("id, started_at, mode, duration_seconds")
+            .eq("user_id", user["id"])
+            .order("started_at", desc=True)
+            .limit(90)
+            .execute()
+        )
     user_res = (
         supabase.table("users")
         .select("cefr_level, ielts_score, target_exam, preferred_accent")

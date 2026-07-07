@@ -248,8 +248,12 @@ async def websocket_session(
             })
 
     async def run_silence_nudge() -> None:
-        """Proactive coach: if the user stays silent ~12s after the AI finishes,
-        speak a short encouragement instead of dead air."""
+        """Proactive coach: if the user stays silent well after the AI finishes,
+        speak a short encouragement instead of dead air.
+
+        The threshold is measured from when the last audio chunk was SENT — the
+        client may still be *playing* that audio for another 10-15s, so this must
+        be generous or the nudge overlaps the AI's own voice on the phone."""
         while True:
             await asyncio.sleep(2.0)
             last = nudge_state["last_ai_done"]
@@ -258,7 +262,7 @@ async def websocket_session(
                 and not nudge_state["nudged"]
                 and not speaking["on"]
                 and not audio_buffer
-                and time.time() - last > 12.0
+                and time.time() - last > 30.0
             ):
                 nudge_state["nudged"] = True
                 speaking["on"] = True
@@ -314,7 +318,17 @@ async def websocket_session(
         try:
             supabase.table("sessions").update(update).eq("id", session_db_id).execute()
         except Exception:
-            pass
+            # Migration-tolerant fallback: if the scorecard columns don't exist
+            # yet (add_admin.sql not applied), still persist the core fields so
+            # progress/streak/history keep working.
+            try:
+                supabase.table("sessions").update({
+                    "ended_at": update["ended_at"],
+                    "transcript": update["transcript"],
+                    "duration_seconds": update["duration_seconds"],
+                }).eq("id", session_db_id).execute()
+            except Exception:
+                logger.error("session update failed for %s", session_db_id)
 
         # Live level tracking: the scorecard estimates CEFR each session — keep
         # the user profile current so the home level card is real, not mock.

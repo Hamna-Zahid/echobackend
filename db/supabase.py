@@ -44,11 +44,16 @@ def get_admin_client() -> Client:
 def verify_token(token: str) -> Optional[dict]:
     """
     Verify a Supabase JWT and return the user payload.
-    Uses the singleton client — note: get_user() mutates auth state on the client,
-    so admin operations must use get_admin_client() instead.
+
+    Uses a FRESH throwaway client on purpose: auth.get_user(jwt) mutates the
+    client's auth headers, and doing that on the shared singleton silently
+    poisoned every later call on it (admin.create_user returned "User not
+    allowed", table queries ran with the wrong credentials → sessions failed
+    to insert/update, progress queries broke). A fresh client per verification
+    makes token checks side-effect-free.
     """
     try:
-        supabase = get_supabase()
+        supabase = get_admin_client()
         res = supabase.auth.get_user(token)
         if res and res.user:
             return {"id": res.user.id, "email": res.user.email}

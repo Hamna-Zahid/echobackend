@@ -29,7 +29,10 @@ class ProfileUpdateRequest(BaseModel):
 
 @router.post("/register")
 async def register(req: RegisterRequest):
-    supabase = get_supabase()
+    # Fresh admin client — admin.create_user and sign_in mutate client auth
+    # state, and the shared singleton may already be poisoned by verify_token
+    # calls from other requests (symptom: "User not allowed").
+    supabase = get_admin_client()
     try:
         # admin.create_user with email_confirm=True guarantees the auth.users row
         # is fully committed before we touch public.users — sign_up() via service
@@ -72,7 +75,7 @@ async def register(req: RegisterRequest):
 
 @router.post("/login")
 async def login(req: LoginRequest):
-    supabase = get_supabase()
+    supabase = get_admin_client()  # fresh — sign_in mutates client auth state
     try:
         res = supabase.auth.sign_in_with_password({"email": req.email, "password": req.password})
         if res.session is None:
@@ -89,8 +92,8 @@ async def login(req: LoginRequest):
 
 @router.post("/logout")
 async def logout():
-    supabase = get_supabase()
-    supabase.auth.sign_out()
+    # Server holds no per-user auth state (the singleton must never carry a
+    # user session); the client discards its own token. Nothing to do here.
     return {"status": "logged out"}
 
 
