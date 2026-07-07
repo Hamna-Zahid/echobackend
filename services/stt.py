@@ -1,38 +1,40 @@
 """
-STT service — Groq Whisper Large-v3.
+STT service — Groq Whisper Large-v3 (FREE tier: ~14,400 requests/day, no card).
 
-Returns both the transcript text AND pronunciation metadata extracted from
-Whisper's segment-level confidence scores (avg_logprob).
+Returns the transcript text plus a few delivery signals we need for the feedback
+engine: total spoken duration (for words-per-minute) and Whisper's segment-level
+confidence (a rough pronunciation/clarity proxy).
 
-avg_logprob interpretation:
-  > -0.2   → confident recognition → likely clear pronunciation
-  -0.2 to -0.5 → moderate confidence → possible pronunciation issue
-  < -0.5   → low confidence → likely pronunciation difficulty
-
-This is a proxy for pronunciation quality, not a dedicated phoneme model.
-For production-grade pronunciation scoring, wire in Azure Cognitive Services
-Speech SDK (see services/pronunciation.py).
+Everything here runs on Groq's free tier — there is no GPU to host and no per-use
+charge while you build.
 """
 
 import io
 import os
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from typing import Optional
 
 from groq import AsyncGroq
 
 _client: AsyncGroq | None = None
 
-# Threshold below which a segment is flagged as potentially mispronounced
-PRONUNCIATION_FLAG_THRESHOLD = -0.4
+WHISPER_MODEL = "whisper-large-v3"
+
+# Common English filler words/phrases we score delivery against.
+FILLER_PATTERNS = [
+    r"\bum\b", r"\buh\b", r"\ber\b", r"\bah\b", r"\bhmm\b",
+    r"\blike\b", r"\byou know\b", r"\bsort of\b", r"\bkind of\b",
+    r"\bbasically\b", r"\bactually\b", r"\bi mean\b", r"\bso\b",
+]
 
 
 @dataclass
 class TranscriptResult:
     text: str
-    pronunciation_score: Optional[float]   # 0–100 proxy score, None if unavailable
-    flagged_segments: list[str]             # words/phrases with low confidence
-    avg_confidence: Optional[float]         # raw avg_logprob averaged across segments
+    duration_sec: float = 0.0           # spoken length of this utterance
+    avg_confidence: Optional[float] = None
+    filler_hits: dict = field(default_factory=dict)  # {"um": 3, "like": 2, ...}
 
 
 def get_groq_client() -> AsyncGroq:
@@ -42,137 +44,81 @@ def get_groq_client() -> AsyncGroq:
     return _client
 
 
-async def transcribe_audio(
-    audio_bytes: bytes,
-    language: str = "en",
-    include_pronunciation_hints: bool = True,
-) -> str:
-    """
-    Transcribe audio using Groq Whisper Large-v3.
-    Returns plain text transcript string.
-    Target latency: < 200ms for 5–10s utterances.
-    """
-    result = await transcribe_audio_full(audio_bytes, language, include_pronunciation_hints)
+async def transcribe_audio(audio_bytes: bytes, language: str = "en") -> str:
+    """Plain transcript string (used for the live conversation turn)."""
+    result = await transcribe_audio_full(audio_bytes, language)
     return result.text
 
 
-async def transcribe_audio_full(
-    audio_bytes: bytes,
-    language: str = "en",
-    include_pronunciation_hints: bool = True,
-) -> TranscriptResult:
+async def transcribe_audio_full(audio_bytes: bytes, language: str = "en") -> TranscriptResult:
     """
-    Full transcription with pronunciation metadata.
-    Used by diagnostic mode and pronunciation scoring pipeline.
+    Full transcription with delivery metadata (duration + filler counts).
+    Used so the feedback engine can compute accurate WPM and filler stats from
+    real numbers rather than letting the LLM guess.
     """
-    client = get_groq_client()
-
     if not audio_bytes or len(audio_bytes) < 100:
-        return TranscriptResult(text="", pronunciation_score=None, flagged_segments=[], avg_confidence=None)
+        return TranscriptResult(text="")
 
+    client = get_groq_client()
     audio_file = io.BytesIO(audio_bytes)
-    # Set filename so Groq infers correct codec
-    # Android sends webm/opus, iOS sends wav/PCM — Whisper handles both
+    # Filename hints the codec — Android sends webm/opus, iOS sends wav. Whisper handles both.
     audio_file.name = "audio.webm"
 
     try:
-        if include_pronunciation_hints:
-            # verbose_json gives us segment-level confidence (avg_logprob)
-            transcription = await client.audio.transcriptions.create(
-                file=audio_file,
-                model="whisper-large-v3",
-                language=language,
-                response_format="verbose_json",
-            )
-            text = transcription.text.strip() if hasattr(transcription, "text") else ""
-            pronunciation_result = _extract_pronunciation_hints(transcription)
-            return TranscriptResult(
-                text=text,
-                pronunciation_score=pronunciation_result["score"],
-                flagged_segments=pronunciation_result["flagged"],
-                avg_confidence=pronunciation_result["avg_logprob"],
-            )
-        else:
-            transcription = await client.audio.transcriptions.create(
-                file=audio_file,
-                model="whisper-large-v3",
-                language=language,
-                response_format="text",
-            )
-            text = transcription if isinstance(transcription, str) else transcription.text
-            return TranscriptResult(
-                text=text.strip(),
-                pronunciation_score=None,
-                flagged_segments=[],
-                avg_confidence=None,
-            )
-
-    except Exception as e:
-        # Retry once with plain text format (more resilient)
+        transcription = await client.audio.transcriptions.create(
+            file=audio_file,
+            model=WHISPER_MODEL,
+            language=language,
+            response_format="verbose_json",
+        )
+        text = (getattr(transcription, "text", "") or "").strip()
+        duration = float(getattr(transcription, "duration", 0.0) or 0.0)
+        avg_conf = _avg_confidence(transcription)
+        return TranscriptResult(
+            text=text,
+            duration_sec=duration,
+            avg_confidence=avg_conf,
+            filler_hits=count_fillers(text),
+        )
+    except Exception:
+        # Resilient fallback: plain text, no metadata.
         try:
             audio_file.seek(0)
             transcription = await client.audio.transcriptions.create(
                 file=audio_file,
-                model="whisper-large-v3",
+                model=WHISPER_MODEL,
                 language=language,
                 response_format="text",
             )
-            text = transcription if isinstance(transcription, str) else transcription.text
-            return TranscriptResult(
-                text=text.strip() if text else "",
-                pronunciation_score=None,
-                flagged_segments=[],
-                avg_confidence=None,
-            )
+            text = (transcription if isinstance(transcription, str) else getattr(transcription, "text", "")).strip()
+            return TranscriptResult(text=text, filler_hits=count_fillers(text))
         except Exception:
-            return TranscriptResult(text="", pronunciation_score=None, flagged_segments=[], avg_confidence=None)
+            return TranscriptResult(text="")
 
 
-def _extract_pronunciation_hints(transcription) -> dict:
-    """
-    Extract pronunciation confidence hints from Whisper verbose_json segments.
+def count_fillers(text: str) -> dict:
+    """Count filler words/phrases in a piece of transcript."""
+    low = text.lower()
+    hits: dict = {}
+    for pat in FILLER_PATTERNS:
+        n = len(re.findall(pat, low))
+        if n:
+            label = pat.replace(r"\b", "").replace("\\", "")
+            hits[label] = hits.get(label, 0) + n
+    return hits
 
-    avg_logprob per segment is the mean log-probability of all tokens in that segment.
-    We use it as a proxy for pronunciation clarity.
 
-    Returns:
-      score: 0–100 (100 = perfectly clear, 0 = unintelligible)
-      flagged: list of segment texts with low confidence
-      avg_logprob: raw average across all segments
-    """
+def _avg_confidence(transcription) -> Optional[float]:
+    """Mean avg_logprob across segments, mapped to a 0–100 clarity proxy."""
     try:
         segments = getattr(transcription, "segments", None)
         if not segments:
-            return {"score": None, "flagged": [], "avg_logprob": None}
-
-        logprobs = []
-        flagged = []
-
-        for seg in segments:
-            logprob = getattr(seg, "avg_logprob", None)
-            if logprob is not None:
-                logprobs.append(logprob)
-                if logprob < PRONUNCIATION_FLAG_THRESHOLD:
-                    text = getattr(seg, "text", "").strip()
-                    if text:
-                        flagged.append(text)
-
+            return None
+        logprobs = [getattr(s, "avg_logprob", None) for s in segments]
+        logprobs = [lp for lp in logprobs if lp is not None]
         if not logprobs:
-            return {"score": None, "flagged": [], "avg_logprob": None}
-
-        avg_logprob = sum(logprobs) / len(logprobs)
-
-        # Map avg_logprob to 0–100 score
-        # logprob range: 0 (perfect) to -inf (unintelligible)
-        # Practical range: 0 to -1.0 for normal speech
-        # We map: 0 → 100, -0.5 → 50, -1.0 → 0 (clamp below 0)
-        score = max(0.0, min(100.0, (1.0 + avg_logprob) * 100))
-
-        return {
-            "score": round(score, 1),
-            "flagged": flagged[:3],  # Top 3 flagged segments max
-            "avg_logprob": round(avg_logprob, 4),
-        }
-
+            return None
+        avg = sum(logprobs) / len(logprobs)
+        return round(max(0.0, min(100.0, (1.0 + avg) * 100)), 1)
     except Exception:
-        return {"score": None, "flagged": [], "avg_logprob": None}
+        return None

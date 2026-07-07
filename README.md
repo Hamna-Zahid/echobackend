@@ -1,40 +1,60 @@
-# EchoCoach — Backend
+# Echo Backend
 
-FastAPI + async WebSockets backend for EchoCoach, an AI English-coaching app.
-Real-time voice coaching: Groq Whisper (STT) → Gemini/Groq (LLM) → edge-tts (TTS),
-with Supabase (auth + DB) and Upstash Redis (live session state).
+FastAPI backend for Echo — a voice-based AI English coaching app. Single adaptive
+coaching mode (no separate IELTS/interview/daily modes): live voice conversation
+over WebSocket, with a structured feedback scorecard generated after each session.
 
-## Run locally
+## Stack (all free tier, no GPU required)
+
+- **STT**: Groq Whisper Large-v3
+- **LLM**: Groq Llama 3.3 70B (conversation + JSON feedback scoring)
+- **TTS**: Microsoft Edge Neural TTS (free, no key)
+- **Audio delivery analysis** (optional): Gemma 4 12B via Google AI Studio — hears
+  tone/confidence/hesitation from the actual recordings, feeds live coaching tips
+  + the scorecard
+- **Auth + DB**: Supabase (Postgres + RLS)
+- **Admin panel**: built-in, served at `/admin`
+
+## Local setup
+
 ```bash
 python -m venv venv
-venv\Scripts\activate          # Windows  (source venv/bin/activate on macOS/Linux)
-pip install -r requirements.txt   # full set incl. post-session phoneme analysis
-cp .env.example .env              # then fill in your keys
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+venv\Scripts\activate        # Windows; source venv/bin/activate on Linux/Mac
+pip install -r requirements.txt
+cp .env.example .env         # fill in Supabase + Groq keys
+uvicorn main:app --reload
 ```
 
-Health check: `GET /health` → `{"status":"ok"}`.
+`curl http://localhost:8000/health` → `{"status":"ok","service":"Echo API"}`
 
-## Deploy (Railway, Docker)
-This repo deploys as-is — `Dockerfile` is at the root (leave Railway's
-**Root Directory** at default). Uses the lightweight `requirements-deploy.txt`
-(no PyTorch) for a fast ~510 MB image.
+## Required environment variables
 
-Set these environment variables in the Railway dashboard:
+See `.env.example` for the full list. Minimum to boot: `GROQ_API_KEY`,
+`SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`.
+`GEMINI_API_KEY` is optional (enables Gemma 4 audio delivery analysis).
 
-| Variable | Notes |
-|---|---|
-| `GEMINI_API_KEY` | aistudio.google.com |
-| `GROQ_API_KEY` | console.groq.com (Whisper STT + LLM) |
-| `SUPABASE_URL` | Supabase project URL |
-| `SUPABASE_ANON_KEY` | Supabase anon key |
-| `SUPABASE_SERVICE_ROLE_KEY` | Supabase service-role key (server-only) |
-| `REDIS_URL` | Upstash `rediss://...` |
-| `DEV_TTS` | `edge` |
+## Database
 
-The container validates these on boot and exits if any are missing.
+Run these in the Supabase SQL editor, in order:
+1. `db/schema.sql`
+2. `db/migrations/add_user_memory.sql`
+3. `db/migrations/add_admin.sql`
+4. `db/migrations/single_mode.sql` — **required**, drops the old mode CHECK
+   constraint so the single "coach" mode can be used.
 
-## Notes
-- Secrets live only in `.env` (gitignored) and the host's env — never committed.
-- `requirements.txt` = full local dev (adds torch/transformers/kokoro for phoneme
-  analysis). `requirements-deploy.txt` = lean runtime used by the Docker image.
+## Deploy (Render)
+
+- Root directory: repo root (this is a backend-only repo)
+- Build command: `pip install -r requirements.txt`
+- Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+- Set the env vars above in the Render dashboard.
+
+Render's free tier sleeps after 15 min idle; the first request after sleep takes
+~50s to wake the service.
+
+## Admin panel
+
+`GET /admin` — sign in with a Supabase account whose email is listed in
+`ADMIN_EMAILS`, or with `users.is_admin = true`. Shows users, sessions,
+transcripts, scorecards, and a health/events view (STT/LLM/feedback error rates
+and latency).

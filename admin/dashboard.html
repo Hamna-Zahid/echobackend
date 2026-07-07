@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Echo — Admin</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1d212b; --line:#262b36;
+    --text:#e6e9ef; --muted:#8b93a7; --accent:#E11D74; --accent2:#7C3AED;
+    --ok:#10b981; --warn:#f59e0b; --err:#ef4444;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:Inter,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text);font-size:14px}
+  a{color:var(--accent)}
+  .hidden{display:none!important}
+
+  /* Login */
+  #login{min-height:100vh;display:flex;align-items:center;justify-content:center}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px}
+  #login .card{width:340px;padding:28px}
+  #login h1{margin:0 0 4px;font-size:20px}
+  #login p{margin:0 0 20px;color:var(--muted);font-size:13px}
+  input,select{width:100%;padding:10px 12px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;color:var(--text);font-size:14px;margin-bottom:10px}
+  button{cursor:pointer;border:none;border-radius:9px;padding:10px 14px;background:var(--accent);color:#fff;font-weight:600;font-size:14px}
+  button.ghost{background:var(--panel2);border:1px solid var(--line);color:var(--text);font-weight:500}
+  .err{color:var(--err);font-size:12px;min-height:16px;margin-top:4px}
+
+  /* Layout */
+  #app{display:flex;min-height:100vh}
+  aside{width:210px;background:var(--panel);border-right:1px solid var(--line);padding:18px 14px;display:flex;flex-direction:column;gap:4px;position:sticky;top:0;height:100vh}
+  .brand{font-weight:700;font-size:16px;padding:6px 10px 16px;display:flex;align-items:center;gap:8px}
+  .brand .dot{width:9px;height:9px;border-radius:50%;background:var(--accent)}
+  nav a{display:block;padding:9px 11px;border-radius:8px;color:var(--muted);text-decoration:none;font-weight:500;cursor:pointer}
+  nav a:hover{background:var(--panel2);color:var(--text)}
+  nav a.active{background:var(--panel2);color:var(--text)}
+  aside .spacer{flex:1}
+  main{flex:1;padding:24px 28px;max-width:1200px}
+  h2{font-size:19px;margin:0 0 2px}
+  .sub{color:var(--muted);font-size:12px;margin-bottom:20px}
+
+  /* KPIs */
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:18px}
+  .kpi{padding:16px}
+  .kpi .label{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.4px}
+  .kpi .val{font-size:26px;font-weight:700;margin-top:6px}
+  .kpi .delta{font-size:11px;color:var(--muted);margin-top:3px}
+  .grid2{display:grid;grid-template-columns:2fr 1fr;gap:14px;margin-bottom:18px}
+  .chartbox{padding:16px}
+  .chartbox h3{margin:0 0 12px;font-size:13px;color:var(--muted);font-weight:600}
+
+  /* Tables */
+  .toolbar{display:flex;gap:10px;margin-bottom:12px}
+  .toolbar input,.toolbar select{margin:0;max-width:280px}
+  table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--line);font-size:13px}
+  th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.3px}
+  tbody tr{cursor:pointer}
+  tbody tr:hover{background:var(--panel2)}
+  td.mono{font-family:ui-monospace,monospace;font-size:12px;color:var(--muted)}
+  .pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:600}
+  .pill.ok{background:rgba(16,185,129,.15);color:var(--ok)}
+  .pill.err{background:rgba(239,68,68,.15);color:var(--err)}
+  .pill.warn{background:rgba(245,158,11,.15);color:var(--warn)}
+  .pill.mode{background:var(--panel2);color:var(--text)}
+  .score{font-weight:700}
+
+  /* Modal */
+  #modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto;z-index:50}
+  #modal .card{width:760px;max-width:100%;padding:22px}
+  .modal-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+  .modal-head h3{margin:0;font-size:16px}
+  pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:12px;overflow:auto;font-size:12px;max-height:320px}
+  .section-t{font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);margin:16px 0 8px}
+  .muted{color:var(--muted)}
+  .loading{color:var(--muted);padding:20px}
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="login">
+  <div class="card">
+    <h1>Echo Admin</h1>
+    <p>Sign in with an admin account.</p>
+    <input id="email" type="email" placeholder="Email" autocomplete="username" />
+    <input id="password" type="password" placeholder="Password" autocomplete="current-password" />
+    <button id="loginBtn" style="width:100%">Sign in</button>
+    <div class="err" id="loginErr"></div>
+  </div>
+</div>
+
+<!-- APP -->
+<div id="app" class="hidden">
+  <aside>
+    <div class="brand"><span class="dot"></span> Echo Admin</div>
+    <nav>
+      <a data-view="overview" class="active">Overview</a>
+      <a data-view="users">Users</a>
+      <a data-view="sessions">Sessions</a>
+      <a data-view="health">Health &amp; Events</a>
+    </nav>
+    <div class="spacer"></div>
+    <div class="mono" id="whoami" style="padding:6px 11px;font-size:11px"></div>
+    <button class="ghost" id="logoutBtn">Sign out</button>
+  </aside>
+  <main id="content"><div class="loading">Loading…</div></main>
+</div>
+
+<!-- MODAL -->
+<div id="modal" class="hidden">
+  <div class="card">
+    <div class="modal-head"><h3 id="modalTitle"></h3><button class="ghost" onclick="closeModal()">Close</button></div>
+    <div id="modalBody"></div>
+  </div>
+</div>
+
+<script>
+const SUPABASE_URL = "__SUPABASE_URL__";
+const SUPABASE_ANON_KEY = "__SUPABASE_ANON_KEY__";
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+let TOKEN = null, CHARTS = {};
+
+// ── helpers ──────────────────────────────────────────────────────────────
+const $ = (s, r=document) => r.querySelector(s);
+const esc = (s) => (s==null?"":String(s)).replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const fmtDate = (s) => s ? new Date(s).toLocaleString() : "—";
+const fmtDay = (s) => s ? new Date(s).toLocaleDateString() : "—";
+const fmtDur = (sec) => sec==null ? "—" : (sec<60 ? sec+"s" : Math.floor(sec/60)+"m "+(sec%60)+"s");
+const scoreCls = (n) => n==null?"":(n>=70?"ok":n>=50?"warn":"err");
+
+async function api(path){
+  const res = await fetch(path, { headers: { Authorization: "Bearer "+TOKEN } });
+  if(res.status===403){ throw new Error("Your account is not an admin. Add your email to ADMIN_EMAILS."); }
+  if(!res.ok){ throw new Error("API error "+res.status); }
+  return res.json();
+}
+
+// ── auth ─────────────────────────────────────────────────────────────────
+async function doLogin(){
+  $("#loginErr").textContent = "";
+  const email=$("#email").value.trim(), password=$("#password").value;
+  const { data, error } = await sb.auth.signInWithPassword({ email, password });
+  if(error){ $("#loginErr").textContent = error.message; return; }
+  TOKEN = data.session.access_token;
+  start(email);
+}
+async function logout(){ await sb.auth.signOut(); location.reload(); }
+
+async function boot(){
+  const { data } = await sb.auth.getSession();
+  if(data.session){ TOKEN = data.session.access_token; start(data.session.user.email); }
+}
+function start(email){
+  $("#login").classList.add("hidden");
+  $("#app").classList.remove("hidden");
+  $("#whoami").textContent = email || "";
+  route("overview");
+}
+
+// ── routing ──────────────────────────────────────────────────────────────
+document.querySelectorAll("nav a").forEach(a=>a.onclick=()=>{
+  document.querySelectorAll("nav a").forEach(x=>x.classList.remove("active"));
+  a.classList.add("active"); route(a.dataset.view);
+});
+function route(view){
+  const fns={overview:viewOverview,users:viewUsers,sessions:viewSessions,health:viewHealth};
+  $("#content").innerHTML='<div class="loading">Loading…</div>';
+  fns[view]().catch(e=>$("#content").innerHTML='<div class="err">'+esc(e.message)+'</div>');
+}
+
+// ── OVERVIEW ─────────────────────────────────────────────────────────────
+async function viewOverview(){
+  const d = await api("/admin/api/overview");
+  const ts = await api("/admin/api/timeseries?days=30");
+  const u=d.users, s=d.sessions, h=d.health;
+  const kpi=(l,v,sub)=>`<div class="card kpi"><div class="label">${l}</div><div class="val">${v}</div><div class="delta">${sub||""}</div></div>`;
+  $("#content").innerHTML = `
+    <h2>Overview</h2><div class="sub">Live metrics · updated ${fmtDate(d.generated_at)}</div>
+    <div class="kpis">
+      ${kpi("Total users", u.total, `+${u.new_today} today · +${u.new_7d} this week`)}
+      ${kpi("Active users", u.mau, `${u.dau} DAU · ${u.wau} WAU`)}
+      ${kpi("Total sessions", s.total, `${s.today} today`)}
+      ${kpi("Avg score", s.avg_score==null?"—":s.avg_score, `completion ${s.completion_rate}%`)}
+    </div>
+    <div class="kpis">
+      ${kpi("Avg session", fmtDur(s.avg_duration_sec), "duration")}
+      ${kpi("Sessions (30d)", s.last_30d, "")}
+      ${kpi("Events (24h)", h.events_24h, `${h.errors_24h} errors`)}
+      ${kpi("Error rate", h.error_rate_pct+"%", "last 24h")}
+    </div>
+    <div class="grid2">
+      <div class="card chartbox"><h3>Signups &amp; sessions (30d)</h3><canvas id="cTime" height="120"></canvas></div>
+      <div class="card chartbox"><h3>Sessions by mode</h3><canvas id="cMode" height="120"></canvas></div>
+    </div>`;
+  drawLine("cTime", ts.labels, ts.signups, ts.sessions);
+  drawDoughnut("cMode", d.mode_breakdown);
+}
+function drawLine(id,labels,a,b){
+  if(CHARTS[id])CHARTS[id].destroy();
+  CHARTS[id]=new Chart($("#"+id),{type:"line",data:{labels,datasets:[
+    {label:"Signups",data:a,borderColor:"#7C3AED",backgroundColor:"transparent",tension:.3},
+    {label:"Sessions",data:b,borderColor:"#E11D74",backgroundColor:"transparent",tension:.3}]},
+    options:{plugins:{legend:{labels:{color:"#8b93a7"}}},scales:{x:{ticks:{color:"#8b93a7",maxTicksLimit:8},grid:{color:"#262b36"}},y:{ticks:{color:"#8b93a7"},grid:{color:"#262b36"}}}}});
+}
+function drawDoughnut(id,obj){
+  if(CHARTS[id])CHARTS[id].destroy();
+  const labels=Object.keys(obj), data=Object.values(obj);
+  CHARTS[id]=new Chart($("#"+id),{type:"doughnut",data:{labels,datasets:[{data,backgroundColor:["#E11D74","#7C3AED","#6366F1","#0D9488","#D97706","#0EA5E9"]}]},
+    options:{plugins:{legend:{position:"bottom",labels:{color:"#8b93a7"}}}}});
+}
+
+// ── USERS ────────────────────────────────────────────────────────────────
+async function viewUsers(){
+  $("#content").innerHTML=`<h2>Users</h2><div class="sub">Search and inspect every account</div>
+    <div class="toolbar"><input id="uSearch" placeholder="Search email or id…"/><button id="uGo">Search</button></div>
+    <div id="uTable"><div class="loading">Loading…</div></div>`;
+  const load=async()=>{
+    const q=$("#uSearch").value.trim();
+    const d=await api("/admin/api/users?limit=100&search="+encodeURIComponent(q));
+    $("#uTable").innerHTML=`<div class="sub">${d.total} users</div><table><thead><tr>
+      <th>Email</th><th>Joined</th><th>Sessions</th><th>Avg score</th><th>Last active</th></tr></thead><tbody>
+      ${d.users.map(u=>`<tr onclick="openUser('${u.id}')">
+        <td>${esc(u.email||u.id.slice(0,8))}${u.is_admin?' <span class="pill mode">admin</span>':''}</td>
+        <td>${fmtDay(u.created_at)}</td><td>${u.session_count}</td>
+        <td class="score ${scoreCls(u.avg_score)}">${u.avg_score==null?"—":u.avg_score}</td>
+        <td class="mono">${fmtDate(u.last_session||u.last_active)}</td></tr>`).join("")}
+      </tbody></table>`;
+  };
+  $("#uGo").onclick=load; $("#uSearch").onkeydown=e=>{if(e.key==="Enter")load();};
+  load();
+}
+async function openUser(id){
+  openModal("User", '<div class="loading">Loading…</div>');
+  const d=await api("/admin/api/users/"+id);
+  $("#modalBody").innerHTML=`
+    <div class="mono muted">${esc(id)}</div>
+    <div style="font-size:16px;margin:4px 0 2px">${esc(d.email||"—")}</div>
+    <div class="section-t">Profile</div>
+    <div class="muted">Level: ${esc(d.profile.cefr_level||"—")} · Accent: ${esc(d.profile.preferred_accent||"—")} · Streak: ${d.profile.streak_days||0} · Joined ${fmtDay(d.profile.created_at)}</div>
+    <div class="section-t">Sessions (${d.sessions.length})</div>
+    <table><thead><tr><th>Mode</th><th>Started</th><th>Duration</th><th>Score</th></tr></thead><tbody>
+      ${d.sessions.map(s=>`<tr onclick="openSession('${s.id}')"><td><span class="pill mode">${esc(s.mode||"—")}</span></td>
+        <td class="mono">${fmtDate(s.started_at)}</td><td>${fmtDur(s.duration_seconds)}</td>
+        <td class="score ${scoreCls(s.overall_score)}">${s.overall_score==null?"—":s.overall_score}</td></tr>`).join("")||'<tr><td colspan=4 class="muted">No sessions</td></tr>'}
+    </tbody></table>
+    <div class="section-t">Recent events</div>${eventsTable(d.events)}`;
+}
+
+// ── SESSIONS ─────────────────────────────────────────────────────────────
+async function viewSessions(){
+  $("#content").innerHTML=`<h2>Sessions</h2><div class="sub">Every practice session, transcript and scorecard</div>
+    <div class="toolbar"><select id="sMode">
+      <option value="">All modes</option><option>interview</option><option>speech</option>
+      <option>professional</option><option>conversation</option></select><button id="sGo">Filter</button></div>
+    <div id="sTable"><div class="loading">Loading…</div></div>`;
+  const load=async()=>{
+    const m=$("#sMode").value;
+    const d=await api("/admin/api/sessions?limit=100"+(m?"&mode="+m:""));
+    $("#sTable").innerHTML=`<table><thead><tr>
+      <th>User</th><th>Mode</th><th>Started</th><th>Duration</th><th>Score</th><th>WPM</th><th>Fillers</th></tr></thead><tbody>
+      ${d.sessions.map(s=>`<tr onclick="openSession('${s.id}')">
+        <td>${esc(s.email||s.user_id?.slice(0,8)||"—")}</td><td><span class="pill mode">${esc(s.mode||"—")}</span></td>
+        <td class="mono">${fmtDate(s.started_at)}</td><td>${fmtDur(s.duration_seconds)}</td>
+        <td class="score ${scoreCls(s.overall_score)}">${s.overall_score==null?"—":s.overall_score}</td>
+        <td>${s.wpm??"—"}</td><td>${s.filler_count??"—"}</td></tr>`).join("")||'<tr><td colspan=7 class="muted">No sessions</td></tr>'}
+    </tbody></table>`;
+  };
+  $("#sGo").onclick=load; load();
+}
+async function openSession(id){
+  openModal("Session", '<div class="loading">Loading…</div>');
+  const d=await api("/admin/api/sessions/"+id); const s=d.session, fb=s.feedback_json;
+  let fbHtml='<div class="muted">No scorecard (session too short or failed).</div>';
+  if(fb){
+    fbHtml=`<div style="font-size:15px"><b>${fb.overall_score??"—"}/100</b> — ${esc(fb.headline||"")}</div>
+      <div class="muted" style="margin-top:6px">Pace ${fb.delivery?.pace_wpm??"—"} wpm · Fillers ${fb.delivery?.filler_count??"—"} · Clarity ${fb.delivery?.clarity??"—"}/10 · Confidence ${fb.delivery?.confidence??"—"}/10</div>
+      ${fb.strengths?.length?'<div class="section-t">Strengths</div><ul>'+fb.strengths.map(x=>'<li>'+esc(x)+'</li>').join("")+'</ul>':''}
+      ${fb.improvements?.length?'<div class="section-t">Improvements</div><ul>'+fb.improvements.map(x=>'<li>'+esc(x)+'</li>').join("")+'</ul>':''}
+      <details style="margin-top:10px"><summary class="muted">Raw scorecard JSON</summary><pre>${esc(JSON.stringify(fb,null,2))}</pre></details>`;
+  }
+  $("#modalBody").innerHTML=`
+    <div class="muted">${esc(s.email||"")} · <span class="pill mode">${esc(s.mode||"—")}</span> · ${fmtDate(s.started_at)} · ${fmtDur(s.duration_seconds)}</div>
+    <div class="section-t">Scorecard</div>${fbHtml}
+    <div class="section-t">Transcript</div><pre>${esc(s.transcript||"(empty)")}</pre>
+    <div class="section-t">Events</div>${eventsTable(d.events)}`;
+}
+
+// ── HEALTH ───────────────────────────────────────────────────────────────
+async function viewHealth(){
+  const h=await api("/admin/api/health");
+  const ev=await api("/admin/api/events?status=error&limit=80");
+  const rows=Object.entries(h.stages).map(([k,v])=>`<tr><td>${esc(k)}</td><td>${v.total}</td>
+    <td>${v.errors}</td><td class="${v.error_rate_pct>0?'score err':''}">${v.error_rate_pct}%</td>
+    <td>${v.avg_latency_ms==null?"—":v.avg_latency_ms+" ms"}</td></tr>`).join("")
+    || '<tr><td colspan=5 class="muted">No events in the last 24h</td></tr>';
+  $("#content").innerHTML=`<h2>Health &amp; Events</h2><div class="sub">What's working and what's failing (last 24h)</div>
+    <table><thead><tr><th>Stage</th><th>Total</th><th>Errors</th><th>Error rate</th><th>Avg latency</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+    <div class="section-t">Recent errors</div>${eventsTable(ev.events,true)}`;
+}
+
+// ── shared ───────────────────────────────────────────────────────────────
+function eventsTable(events, showDetail){
+  if(!events || !events.length) return '<div class="muted">No events.</div>';
+  return `<table><thead><tr><th>When</th><th>Type</th><th>Status</th><th>Latency</th>${showDetail?'<th>User</th><th>Detail</th>':''}</tr></thead><tbody>
+    ${events.map(e=>`<tr><td class="mono">${fmtDate(e.created_at)}</td><td>${esc(e.event_type)}</td>
+      <td><span class="pill ${e.status==='error'?'err':'ok'}">${esc(e.status)}</span></td>
+      <td>${e.latency_ms==null?"—":e.latency_ms+" ms"}</td>
+      ${showDetail?`<td>${esc(e.email||e.user_id?.slice(0,8)||"—")}</td><td class="mono">${esc(e.detail?JSON.stringify(e.detail):"")}</td>`:''}</tr>`).join("")}
+  </tbody></table>`;
+}
+function openModal(title,body){ $("#modalTitle").textContent=title; $("#modalBody").innerHTML=body; $("#modal").classList.remove("hidden"); }
+function closeModal(){ $("#modal").classList.add("hidden"); }
+$("#modal").onclick=e=>{ if(e.target.id==="modal") closeModal(); };
+
+// ── init ─────────────────────────────────────────────────────────────────
+$("#loginBtn").onclick=doLogin;
+$("#password").onkeydown=e=>{ if(e.key==="Enter") doLogin(); };
+$("#logoutBtn").onclick=logout;
+boot();
+</script>
+</body>
+</html>

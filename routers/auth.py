@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from typing import Literal, Optional
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel
 
 from db.supabase import get_supabase, get_admin_client, get_current_user
 
@@ -8,24 +8,16 @@ router = APIRouter()
 
 
 class RegisterRequest(BaseModel):
-    email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
-    full_name: str = Field(min_length=1, max_length=80)
-    target_exam: Literal["IELTS", "TOEFL", "INTERVIEW", "Job Interview", "General English"] = "IELTS"
+    email: str
+    password: str
+    full_name: str = ""
+    target_exam: Literal["IELTS", "TOEFL", "INTERVIEW", "General English"] = "IELTS"
     preferred_accent: Literal["american", "british"] = "american"
-
-    @field_validator("full_name")
-    @classmethod
-    def _strip_name(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("Name is required")
-        return v
 
 
 class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str = Field(min_length=1)
+    email: str
+    password: str
 
 
 class ProfileUpdateRequest(BaseModel):
@@ -52,23 +44,14 @@ async def register(req: RegisterRequest):
 
         user_id = res.user.id
 
-        # Normalize target_exam to the DB-allowed set (the check constraint predates
-        # the "Job Interview" label the app sends).
-        exam_map = {
-            "IELTS": "IELTS", "TOEFL": "TOEFL",
-            "Job Interview": "INTERVIEW", "INTERVIEW": "INTERVIEW",
-            "General English": "General English",
-        }
-        db_exam = exam_map.get(req.target_exam, "IELTS")
-
         # Upsert profile fields onto the row the trigger already created.
         upsert_data = {
             "id": user_id,
-            "full_name": req.full_name,
-            "target_exam": db_exam,
-            "exam_target": req.target_exam,   # original label (for accent-mode routing)
+            "target_exam": req.target_exam,
             "preferred_accent": req.preferred_accent,
         }
+        if req.full_name:
+            upsert_data["full_name"] = req.full_name
         supabase.table("users").upsert(upsert_data, on_conflict="id").execute()
 
         # Sign the user in to return a usable session token immediately.

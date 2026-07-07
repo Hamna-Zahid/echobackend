@@ -7,29 +7,6 @@ from db.supabase import get_supabase, get_current_user
 router = APIRouter()
 
 
-def _latest_roadmap(supabase, user_id: str) -> dict:
-    """
-    Fetch the user's most recent learning roadmap from learning_plans.plan_json.
-    Returns {} if no diagnostic has been run yet. Never raises.
-    """
-    try:
-        res = (
-            supabase.table("learning_plans")
-            .select("plan_json, generated_at")
-            .eq("user_id", user_id)
-            .order("generated_at", desc=True)
-            .limit(1)
-            .execute()
-        )
-        if not res.data:
-            return {}
-        plan = res.data[0].get("plan_json") or {}
-        roadmap = plan.get("roadmap") if isinstance(plan, dict) else None
-        return roadmap if isinstance(roadmap, dict) else {}
-    except Exception:
-        return {}
-
-
 def _compute_streak(sessions: list) -> int:
     """
     Count the number of consecutive days (ending today or yesterday) that
@@ -109,7 +86,7 @@ async def get_progress(user=Depends(get_current_user)):
     # Fetch up to 90 sessions for streak calculation + recent display
     sessions_res = (
         supabase.table("sessions")
-        .select("id, fluency_score, lexical_score, grammar_score, pronunciation_score, cefr_score, started_at, mode, duration_seconds")
+        .select("id, overall_score, wpm, filler_count, started_at, mode, duration_seconds")
         .eq("user_id", user["id"])
         .order("started_at", desc=True)
         .limit(90)
@@ -117,7 +94,7 @@ async def get_progress(user=Depends(get_current_user)):
     )
     user_res = (
         supabase.table("users")
-        .select("full_name, cefr_level, ielts_score, target_exam, preferred_accent, goal")
+        .select("cefr_level, ielts_score, target_exam, preferred_accent")
         .eq("id", user["id"])
         .single()
         .execute()
@@ -139,61 +116,49 @@ async def get_progress(user=Depends(get_current_user)):
     all_sessions = sessions_res.data or []
     user_data = user_res.data or {}
 
-    # Gamification + entitlements (single source of truth: users.memory)
-    from services.user_state import get_memory
-    from services.gamification import get_progress as _gami_progress
-    from services.entitlements import entitlements as _entitlements
-    _mem = get_memory(user["id"])
-    gami = _gami_progress(user["id"], cefr=user_data.get("cefr_level"), memory=_mem)
-
-    # Prefer the gamified streak; fall back to the computed one
-    user_data["streak_days"]        = gami.get("streak_days") or _compute_streak(all_sessions)
+    # Compute streak from session dates (no separate DB column needed)
+    user_data["streak_days"]        = _compute_streak(all_sessions)
     user_data["total_sessions"]     = total_sessions_res.count or 0
     user_data["total_errors_fixed"] = errors_fixed_res.count or 0
-    # Attach the AI-generated roadmap (stored in learning_plans) for the home "Your Plan" card
-    user_data["roadmap"]            = _latest_roadmap(supabase, user["id"])
 
+    # ── Live home-card stats, computed from real scorecards ──────────────────
+    # progress_percentage: average overall score of the last 10 scored sessions
+    # (the natural "how close am I to the next level" proxy).
+    recent_scores = [s["overall_score"] for s in all_sessions[:10] if s.get("overall_score") is not None]
+    user_data["progress_percentage"] = int(round(sum(recent_scores) / len(recent_scores))) if recent_scores else 0
+
+    # confidence_score: mean of the audio-native confidence judgment (1-10 →
+    # percent) from the last 10 scorecards. Falls back to None when unscored.
+    try:
+        fb_res = (
+            supabase.table("sessions")
+            .select("feedback_json")
+            .eq("user_id", user["id"])
+            .not_.is_("feedback_json", "null")
+            .order("started_at", desc=True)
+            .limit(10)
+            .execute()
+        )
+        confs = []
+        for row in (fb_res.data or []):
+            c = ((row.get("feedback_json") or {}).get("delivery") or {}).get("confidence")
+            if isinstance(c, (int, float)):
+                confs.append(float(c))
+        user_data["confidence_score"] = int(round(sum(confs) / len(confs) * 10)) if confs else None
+    except Exception:
+        user_data["confidence_score"] = None
+
+    # next_level: one CEFR step above the current level.
+    ladder = ["A1", "A2", "B1", "B2", "C1", "C2"]
+    cur = user_data.get("cefr_level")
+    user_data["next_level"] = (
+        ladder[min(ladder.index(cur) + 1, len(ladder) - 1)] if cur in ladder else None
+    )
+
+    # Return only the 10 most recent for the home/history screens
     return {
         "user": user_data,
         "recent_sessions": all_sessions[:10],
-        "gamification": gami,
-        "entitlements": _entitlements(_mem),
-    }
-
-
-@router.get("/roadmap")
-async def get_roadmap(user=Depends(get_current_user)):
-    """
-    Return the user's AI-generated learning roadmap (from the first diagnostic)
-    plus the computed 'next' session to take. Empty roadmap if no diagnostic yet.
-    """
-    supabase = get_supabase()
-    res = (
-        supabase.table("users")
-        .select("goal, cefr_level, ielts_score")
-        .eq("id", user["id"])
-        .single()
-        .execute()
-    )
-    data = res.data or {}
-    roadmap = _latest_roadmap(supabase, user["id"])
-    sessions = roadmap.get("sessions") if isinstance(roadmap, dict) else None
-    sessions = sessions if isinstance(sessions, list) else []
-    done = int(roadmap.get("completed_count", 0)) if isinstance(roadmap, dict) else 0
-
-    next_session = sessions[done] if 0 <= done < len(sessions) else None
-
-    from services.gamification import get_progress as _gami
-    return {
-        "roadmap": roadmap,
-        "goal": data.get("goal") or (roadmap.get("goal") if isinstance(roadmap, dict) else None),
-        "cefr_level": data.get("cefr_level"),
-        "ielts_score": data.get("ielts_score"),
-        "total_sessions": len(sessions),
-        "completed_count": done,
-        "next_session": next_session,
-        "has_plan": len(sessions) > 0,
-        "gamification": _gami(user["id"], cefr=data.get("cefr_level")),
     }
 
 
@@ -203,80 +168,6 @@ async def resolve_error(error_id: str, user=Depends(get_current_user)):
     supabase = get_supabase()
     supabase.table("errors").update({"resolved": True}).eq("id", error_id).eq("user_id", user["id"]).execute()
     return {"status": "resolved"}
-
-
-@router.get("/{session_id}/summary")
-async def get_session_summary(session_id: str, user=Depends(get_current_user)):
-    """
-    Post-session screen payload: the session row + XP/level result for this session
-    (idempotently awarded) + current gamification + the AI report (if ready yet).
-    """
-    from datetime import datetime, timezone
-    from services.user_state import get_memory
-    from services.gamification import award_session, get_progress
-    supabase = get_supabase()
-
-    row = (
-        supabase.table("sessions")
-        .select("*")
-        .eq("id", session_id)
-        .eq("user_id", user["id"])
-        .single()
-        .execute()
-    ).data
-    if not row:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    # errors corrected in this session (for the report)
-    errs = (
-        supabase.table("errors")
-        .select("error_type, original_utterance, corrected_form, explanation")
-        .eq("session_id", session_id)
-        .execute()
-    ).data or []
-
-    from services.entitlements import is_premium as _is_premium
-    mem = get_memory(user["id"])
-    premium = _is_premium(mem)
-    cefr = None
-    try:
-        u = supabase.table("users").select("cefr_level").eq("id", user["id"]).single().execute()
-        cefr = (u.data or {}).get("cefr_level")
-    except Exception:
-        pass
-
-    # minutes from the row (duration filled by DB trigger on close)
-    minutes = 1
-    if row.get("duration_seconds"):
-        minutes = max(1, int(row["duration_seconds"]) // 60)
-    elif row.get("started_at") and row.get("ended_at"):
-        try:
-            a = datetime.fromisoformat(row["started_at"].replace("Z", "+00:00"))
-            b = datetime.fromisoformat(row["ended_at"].replace("Z", "+00:00"))
-            minutes = max(1, int((b - a).total_seconds()) // 60)
-        except Exception:
-            pass
-
-    xp = award_session(user["id"], row.get("mode", "training"), minutes, cefr=cefr, session_id=session_id)
-    gami = get_progress(user["id"], cefr=cefr)
-
-    report = None
-    reports = mem.get("reports")
-    if isinstance(reports, dict):
-        report = reports.get(session_id)
-    if not report and isinstance(row.get("report_json"), dict):
-        report = row["report_json"]
-
-    return {
-        "session": row,
-        "errors": errs,
-        "xp": xp,
-        "gamification": gami,
-        "is_premium": premium,
-        "report": report if premium else None,   # deep report is a premium feature
-        "report_ready": report is not None,
-        "report_locked": (report is not None) and (not premium),
-    }
 
 
 @router.get("/{session_id}")

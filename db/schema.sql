@@ -4,26 +4,15 @@
 -- Users (extends Supabase auth.users)
 create table public.users (
   id uuid primary key references auth.users(id) on delete cascade,
-  full_name text,
   cefr_level text,
   ielts_score decimal(3,1),
-  target_exam text check (target_exam in ('IELTS','TOEFL','INTERVIEW','General English')),
+  target_exam text check (target_exam in ('IELTS','TOEFL','INTERVIEW')),
   preferred_accent text default 'american' check (preferred_accent in ('american','british')),
   goal text,
   streak_days int default 0,
-  exam_target text,
-  memory jsonb default '{}'::jsonb,
-  roadmap jsonb default '{}'::jsonb,   -- AI-generated multi-session learning plan (from first diagnostic)
   created_at timestamptz default now(),
   last_active timestamptz default now()
 );
-
--- Migration: add missing columns to existing users table
--- alter table public.users add column if not exists full_name text;
--- alter table public.users add column if not exists memory jsonb default '{}'::jsonb;
--- alter table public.users alter column target_exam type text;
--- alter table public.users drop constraint if exists users_target_exam_check;
--- alter table public.users add constraint users_target_exam_check check (target_exam in ('IELTS','TOEFL','INTERVIEW','General English'));
 
 -- Sessions
 create table public.sessions (
@@ -39,12 +28,8 @@ create table public.sessions (
   grammar_score decimal(3,1),
   pronunciation_score decimal(3,1),
   transcript text,
-  report_json jsonb,          -- post-session report: grammar errors, phoneme analysis, IELTS band
   created_at timestamptz default now()
 );
-
--- Migration: add report_json to existing sessions tables
--- alter table public.sessions add column if not exists report_json jsonb;
 
 -- Errors — the personalization engine backbone
 create table public.errors (
