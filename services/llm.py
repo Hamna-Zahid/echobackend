@@ -66,6 +66,44 @@ async def stream_conversation(
         yield "Sorry, could you repeat that?"
 
 
+# ── Stream C: live grammar correction check ──────────────────────────────────
+
+async def run_correction_check(utterance: str) -> dict | None:
+    """
+    Fast grammar/error check on one user utterance (Groq 8B instant, JSON mode).
+    Returns the correction dict when a real error is found, else None.
+    Fire-and-forget from the session loop — must never block or crash a turn.
+    """
+    from prompts.correction import CORRECTION_SYSTEM
+
+    clean = utterance.strip()
+    if len(clean.split()) < 4:
+        return None  # too short to judge fairly
+
+    try:
+        client = get_groq_client()
+        response = await client.chat.completions.create(
+            model=FAST_MODEL,
+            messages=[
+                {"role": "system", "content": CORRECTION_SYSTEM},
+                {"role": "user", "content": clean},
+            ],
+            stream=False,
+            max_tokens=220,
+            temperature=0.0,
+            response_format={"type": "json_object"},
+        )
+        result = json.loads(response.choices[0].message.content)
+        if not isinstance(result, dict) or not result.get("error"):
+            return None
+        # Require the schema fields the app renders.
+        if not result.get("original") or not result.get("corrected"):
+            return None
+        return result
+    except Exception:
+        return None
+
+
 # ── Feedback engine: structured scoring (the part people pay for) ─────────────
 
 async def generate_feedback_json(system_prompt: str, user_payload: str) -> dict | None:

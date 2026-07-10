@@ -55,9 +55,11 @@ Be specific to what you heard. No markdown, JSON only."""
 
 
 def _sniff_mime(audio: bytes) -> str:
-    """Detect container from magic bytes (Android sends webm/opus, iOS wav)."""
+    """Detect container from magic bytes (Android sends m4a/AAC, iOS wav)."""
     if audio[:4] == b"RIFF":
         return "audio/wav"
+    if len(audio) > 8 and audio[4:8] == b"ftyp":
+        return "audio/mp4"
     if audio[:4] == b"\x1aE\xdf\xa3":
         return "audio/webm"
     if audio[:3] == b"ID3" or (len(audio) > 1 and audio[0] == 0xFF and (audio[1] & 0xE0) == 0xE0):

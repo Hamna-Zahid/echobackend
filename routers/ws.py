@@ -35,7 +35,7 @@ from fastapi.websockets import WebSocketState
 
 from db.supabase import get_supabase, verify_token
 from services.stt import transcribe_audio_full
-from services.llm import stream_conversation
+from services.llm import stream_conversation, run_correction_check
 from services.tts import stream_tts
 from services.feedback import compute_delivery_metrics, generate_session_feedback
 from services.gemma_audio import analyze_delivery, format_delivery_notes
@@ -223,6 +223,58 @@ async def websocket_session(
             except Exception:
                 pass
         gen_task = None
+
+    async def run_grammar_check(utterance: str) -> None:
+        """Stream C: live grammar correction on the user's words. Fire-and-forget —
+        the card slides in while the AI is already speaking its reply."""
+        t0 = time.time()
+        try:
+            async with asyncio.timeout(8.0):
+                result = await run_correction_check(utterance)
+        except Exception:
+            return
+        if not result:
+            return
+        log_event("correction", user_id=user_id, session_id=session_db_id,
+                  latency_ms=int((time.time() - t0) * 1000),
+                  detail={"error_type": result.get("error_type")})
+        await send_json(websocket, {
+            "type": "correction_card",
+            "error": {
+                "error_type": result.get("error_type", "VOCAB"),
+                "original_utterance": result.get("original", ""),
+                "corrected_form": result.get("corrected", ""),
+                "explanation": result.get("explanation", ""),
+                "full_sentence": result.get("better_version", ""),
+            },
+        })
+        # Persist for the progress/error-history screens (recurrence-aware).
+        try:
+            existing = (
+                supabase.table("errors")
+                .select("id, recurrence_count")
+                .eq("user_id", user_id)
+                .eq("original_utterance", result.get("original", ""))
+                .eq("error_type", result.get("error_type", ""))
+                .limit(1)
+                .execute()
+            )
+            if existing.data:
+                supabase.table("errors").update({
+                    "recurrence_count": existing.data[0]["recurrence_count"] + 1,
+                    "last_seen": datetime.now(timezone.utc).isoformat(),
+                }).eq("id", existing.data[0]["id"]).execute()
+            else:
+                supabase.table("errors").insert({
+                    "user_id": user_id,
+                    "session_id": session_db_id,
+                    "error_type": result.get("error_type", "VOCAB"),
+                    "original_utterance": result.get("original", ""),
+                    "corrected_form": result.get("corrected", ""),
+                    "explanation": result.get("explanation", ""),
+                }).execute()
+        except Exception:
+            pass  # history persistence is best-effort
 
     async def run_delivery_analysis(audio_bytes: bytes, duration_sec: float) -> None:
         """Gemma 4 sidecar: hear the answer, store the judgment, maybe coach live."""
@@ -420,7 +472,9 @@ async def websocket_session(
                 history.append({"role": "user", "content": transcript})
                 tip_state["turn"] += 1
                 nudge_state["nudged"] = True  # user spoke — cancel pending nudge this turn
-                # Gemma 4 hears the actual audio in parallel — never blocks the reply.
+                # Sidecars run in parallel — neither blocks the spoken reply:
+                # grammar check (correction card) + Gemma 4 delivery analysis.
+                analysis_tasks.append(asyncio.create_task(run_grammar_check(transcript)))
                 analysis_tasks.append(asyncio.create_task(
                     run_delivery_analysis(audio_bytes, stt.duration_sec)))
                 gen_task = asyncio.create_task(speak_ai_turn(None))

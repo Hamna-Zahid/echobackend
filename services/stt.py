@@ -61,8 +61,9 @@ async def transcribe_audio_full(audio_bytes: bytes, language: str = "en") -> Tra
 
     client = get_groq_client()
     audio_file = io.BytesIO(audio_bytes)
-    # Filename hints the codec — Android sends webm/opus, iOS sends wav. Whisper handles both.
-    audio_file.name = "audio.webm"
+    # The filename extension tells Groq which decoder to use — sniff the real
+    # container from magic bytes (Android sends m4a/AAC, iOS wav, older builds webm).
+    audio_file.name = f"audio.{_sniff_container(audio_bytes)}"
 
     try:
         transcription = await client.audio.transcriptions.create(
@@ -94,6 +95,23 @@ async def transcribe_audio_full(audio_bytes: bytes, language: str = "en") -> Tra
             return TranscriptResult(text=text, filler_hits=count_fillers(text))
         except Exception:
             return TranscriptResult(text="")
+
+
+def _sniff_container(audio: bytes) -> str:
+    """Detect the audio container from magic bytes so Groq picks the right decoder."""
+    if len(audio) < 12:
+        return "webm"
+    if audio[:4] == b"RIFF":
+        return "wav"
+    if audio[4:8] == b"ftyp":
+        return "m4a"
+    if audio[:4] == b"\x1aE\xdf\xa3":
+        return "webm"
+    if audio[:4] == b"OggS":
+        return "ogg"
+    if audio[:3] == b"ID3" or (audio[0] == 0xFF and (audio[1] & 0xE0) == 0xE0):
+        return "mp3"
+    return "webm"
 
 
 def count_fillers(text: str) -> dict:
