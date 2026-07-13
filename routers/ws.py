@@ -379,11 +379,13 @@ async def websocket_session(
         metrics = compute_delivery_metrics(metrics_acc["words"], metrics_acc["seconds"], metrics_acc["fillers"])
         report = None
         t_fb = time.time()
-        # Let any in-flight Gemma analyses land (bounded) so the scorecard sees them.
+        # Let any in-flight audio analyses land so the scorecard reflects the
+        # last turn too. Gemini audio judgment runs ~15s, so give it room —
+        # this wait happens behind the app's "Analyzing…" screen, not mid-chat.
         if analysis_tasks:
             try:
                 await asyncio.wait_for(
-                    asyncio.gather(*analysis_tasks, return_exceptions=True), timeout=6.0)
+                    asyncio.gather(*analysis_tasks, return_exceptions=True), timeout=16.0)
             except asyncio.TimeoutError:
                 pass
         try:
