@@ -35,9 +35,9 @@ def _validate_env():
     tts = os.environ.get("DEV_TTS", "edge").lower()
     print(f"[Echo] Cascade: Groq Whisper + Llama 3.3 70B + Edge TTS ({tts}) — free tier, no GPU")
     if os.environ.get("GEMINI_API_KEY"):
-        print(f"[Echo] Gemma 4 audio delivery analysis: ON ({os.environ.get('GEMMA_AUDIO_MODEL', 'gemma-4-12b-it')})")
+        print(f"[Echo] Audio delivery analysis: ON ({os.environ.get('GEMMA_AUDIO_MODEL', 'gemini-flash-latest')})")
     else:
-        print("[Echo] Gemma 4 audio delivery analysis: off (set GEMINI_API_KEY to enable — free at aistudio.google.com)")
+        print("[Echo] Audio delivery analysis: off (set GEMINI_API_KEY to enable — free at aistudio.google.com)")
 
 
 _validate_env()
