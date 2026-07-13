@@ -186,14 +186,20 @@ async def resolve_error(error_id: str, user=Depends(get_current_user)):
 @router.get("/{session_id}")
 async def get_session(session_id: str, user=Depends(get_current_user)):
     supabase = get_supabase()
-    res = (
-        supabase.table("sessions")
-        .select("*, errors(*)")
-        .eq("id", session_id)
-        .eq("user_id", user["id"])
-        .single()
-        .execute()
-    )
+    # Always scoped to the caller's user_id, so one user can never read another's
+    # session. `.single()` raises on zero rows (incl. a mismatched owner or a
+    # malformed id) — treat every such case as a clean 404, never a 500 leak.
+    try:
+        res = (
+            supabase.table("sessions")
+            .select("*, errors(*)")
+            .eq("id", session_id)
+            .eq("user_id", user["id"])
+            .single()
+            .execute()
+        )
+    except Exception:
+        raise HTTPException(status_code=404, detail="Session not found")
     if not res.data:
         raise HTTPException(status_code=404, detail="Session not found")
     return res.data
