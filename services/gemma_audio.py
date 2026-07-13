@@ -28,30 +28,41 @@ import httpx
 
 logger = logging.getLogger("echo.gemma")
 
-GEMMA_MODEL = os.environ.get("GEMMA_AUDIO_MODEL", "gemma-4-12b-it")
+# NOTE: the audio-capable Gemma 4 variants (E2B/E4B/12B) are open-weights only —
+# Google's hosted API serves just the text-only 26B/31B. Gemini 2.5 Flash fills
+# the audio-analysis slot on the same free key (audio input, no 30s cap).
+GEMMA_MODEL = os.environ.get("GEMMA_AUDIO_MODEL", "gemini-flash-latest")
 _API_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     "{model}:generateContent"
 )
 
-# Gemma 4 hard limit: 30 s of audio per clip. We leave headroom.
-MAX_AUDIO_SECONDS = 29.0
+# Keep clips bounded (cost + latency); Gemini Flash itself allows far longer.
+MAX_AUDIO_SECONDS = 90.0
 # Don't bother analysing tiny clips ("yes", "okay").
 MIN_AUDIO_SECONDS = 3.0
 
-_ANALYSIS_PROMPT = """You are an expert speaking coach listening to one answer from a practice interview/speech session.
+_ANALYSIS_PROMPT = """You are an expert pronunciation & delivery coach listening to one answer from an English practice session.
 
-Listen to HOW the person speaks, not just the words. Return ONLY a JSON object:
+The speaker intended to say (speech-recognizer transcript):
+"{transcript}"
 
-{
+Listen to HOW they actually said it — compare the audio against this transcript word by word. Return ONLY a JSON object:
+
+{{
   "confidence": <int 1-10, how confident they SOUND>,
   "tone": "<2-4 words, e.g. 'flat and hesitant', 'warm, engaged'>",
   "hesitancy": "low" | "medium" | "high",
   "pronunciation_flags": ["<specific word/sound they struggled with>", ...max 2],
+  "word_scores": [
+    // ONLY words that were mispronounced or unclear in the audio — max 4.
+    // Empty list if pronunciation was fine. Words must appear in the transcript.
+    {{"word": "<word from transcript>", "verdict": "off", "issue": "<max 6 words, e.g. 'th sounded like d'>"}}
+  ],
   "delivery_tip": "<ONE short actionable tip about their DELIVERY (voice, pace, energy, hesitation) — or empty string if delivery was fine>"
-}
+}}
 
-Be specific to what you heard. No markdown, JSON only."""
+Be strict but fair: only flag words genuinely mispronounced in the AUDIO, never grammar issues. No markdown, JSON only."""
 
 
 def _sniff_mime(audio: bytes) -> str:
@@ -73,9 +84,10 @@ def is_configured() -> bool:
     return bool(os.environ.get("GEMINI_API_KEY"))
 
 
-async def analyze_delivery(audio_bytes: bytes, duration_sec: float) -> Optional[dict]:
+async def analyze_delivery(audio_bytes: bytes, duration_sec: float, transcript: str = "") -> Optional[dict]:
     """
-    Send one utterance's audio to Gemma 4 and get a delivery judgment.
+    Send one utterance's audio + its transcript to Gemma 4 and get a delivery
+    judgment including per-word pronunciation verdicts (the heatmap payload).
     Returns the parsed dict, or None whenever anything prevents analysis
     (no key, clip too long/short, network/quota error, bad response).
     """
@@ -88,18 +100,25 @@ async def analyze_delivery(audio_bytes: bytes, duration_sec: float) -> Optional[
     payload = {
         "contents": [{
             "parts": [
-                {"text": _ANALYSIS_PROMPT},
+                {"text": _ANALYSIS_PROMPT.format(transcript=transcript[:600] or "(unavailable)")},
                 {"inline_data": {
                     "mime_type": _sniff_mime(audio_bytes),
                     "data": base64.b64encode(audio_bytes).decode("utf-8"),
                 }},
             ],
         }],
-        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 250},
+        "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": 1024,
+            # Flash models think by default; reasoning tokens would eat the
+            # output budget and return an empty text part. This is a fast
+            # structured-judgment call — no thinking needed.
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
     }
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0)) as client:
             res = await client.post(
                 _API_URL.format(model=GEMMA_MODEL),
                 params={"key": api_key},
@@ -110,7 +129,8 @@ async def analyze_delivery(audio_bytes: bytes, duration_sec: float) -> Optional[
             return None
 
         data = res.json()
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        parts = (data.get("candidates") or [{}])[0].get("content", {}).get("parts", [])
+        text = next((p["text"] for p in parts if isinstance(p, dict) and p.get("text")), "")
         start, end = text.find("{"), text.rfind("}")
         if start < 0 or end <= start:
             return None

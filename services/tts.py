@@ -1,23 +1,36 @@
 """
-TTS service — Microsoft Edge Neural TTS via edge-tts (FREE, no API key).
-
-Returns raw PCM F32LE chunks at 24 kHz (what the mobile client plays). Good
-neural voice quality (Azure voices under the hood), zero cost.
+TTS service — streaming voice synthesis.
 
 DEV_TTS modes:
-  edge    → Edge Neural TTS (default, free)
-  silent  → 0.3 s of silence per call (AI-logic testing only, fastest)
+  edge     → Microsoft Edge Neural TTS (default — FREE, no key, good quality)
+  cartesia → Cartesia Sonic streaming (pro voice quality, true progressive
+             streaming; needs CARTESIA_API_KEY + CARTESIA_VOICE_ID_* env;
+             free monthly allowance, then paid). Auto-falls back to edge on
+             any failure — flipping this env var can never break sessions.
+  silent   → 0.3 s of silence per call (AI-logic testing only, fastest)
+
+Always yields raw PCM F32LE chunks at 24 kHz (what the mobile client plays).
 """
 
+import base64
+import json
 import os
 import io
 import struct
 from typing import AsyncGenerator
 
+import httpx
+
 EDGE_VOICES = {
     "american": "en-US-AriaNeural",
     "british":  "en-GB-SoniaNeural",
     "male":     "en-US-GuyNeural",
+}
+
+CARTESIA_URL = "https://api.cartesia.ai/tts/sse"
+CARTESIA_VOICES = {
+    "american": os.environ.get("CARTESIA_VOICE_ID_AMERICAN", ""),
+    "british":  os.environ.get("CARTESIA_VOICE_ID_BRITISH", ""),
 }
 
 _TTS_MODE = os.environ.get("DEV_TTS", "edge").lower()
@@ -36,8 +49,68 @@ async def stream_tts(
         yield bytes(int(sample_rate * 0.3) * 4)
         return
 
+    if _TTS_MODE == "cartesia":
+        produced = False
+        async for chunk in _cartesia_tts(text, accent, sample_rate):
+            produced = True
+            yield chunk
+        if produced:
+            return
+        # Cartesia unavailable/failed — fall through to edge so the session
+        # keeps speaking no matter what.
+
     async for chunk in _edge_tts(text, accent, sample_rate):
         yield chunk
+
+
+async def _cartesia_tts(
+    text: str,
+    accent: str = "american",
+    sample_rate: int = 24000,
+) -> AsyncGenerator[bytes, None]:
+    """Cartesia Sonic SSE — streams PCM chunks as they're generated."""
+    api_key = os.environ.get("CARTESIA_API_KEY", "")
+    voice_id = CARTESIA_VOICES.get(accent) or CARTESIA_VOICES.get("american", "")
+    if not api_key or not voice_id:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0)) as client:
+            async with client.stream(
+                "POST", CARTESIA_URL,
+                headers={
+                    "X-API-Key": api_key,
+                    "Cartesia-Version": "2025-04-16",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model_id": "sonic-2",
+                    "transcript": text,
+                    "voice": {"mode": "id", "id": voice_id},
+                    "output_format": {
+                        "container": "raw",
+                        "encoding": "pcm_f32le",
+                        "sample_rate": sample_rate,
+                    },
+                },
+            ) as response:
+                if response.status_code != 200:
+                    return
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data_str = line[6:].strip()
+                    if data_str in ("[DONE]", ""):
+                        break
+                    try:
+                        event = json.loads(data_str)
+                    except Exception:
+                        continue
+                    if event.get("done"):
+                        break
+                    if event.get("data"):
+                        yield base64.b64decode(event["data"])
+    except Exception:
+        return
 
 
 async def _edge_tts(

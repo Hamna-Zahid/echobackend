@@ -173,11 +173,28 @@ async def websocket_session(
 
     await send_json(websocket, {"type": "session_ready", "mode": mode, "session_id": session_db_id})
 
-    # ── Stream one AI turn (LLM tokens -> sentences -> TTS) ───────────────────
+    # ── Stream one AI turn (LLM tokens -> sentence queue -> TTS worker) ───────
+    # Producer/consumer overlap: the LLM keeps generating sentence N+1 while the
+    # TTS worker is still synthesizing/streaming sentence N. This hides all TTS
+    # latency except the very first sentence — the single biggest free-tier
+    # latency win available (no engine change needed).
     async def speak_ai_turn(user_message: Optional[str]) -> None:
         speaking["on"] = True
         sentence_buf = ""
         full = ""
+        queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
+
+        async def tts_worker() -> None:
+            while True:
+                sentence = await queue.get()
+                if sentence is None:
+                    return
+                if not speaking["on"]:
+                    continue  # drain remaining items after interruption
+                await send_json(websocket, {"type": "ai_text", "text": sentence})
+                await _pipe_tts(sentence)
+
+        worker = asyncio.create_task(tts_worker())
         try:
             async for token in stream_conversation(system_prompt, history, user_message):
                 if not speaking["on"]:
@@ -186,13 +203,11 @@ async def websocket_session(
                 full += token
                 if any(sentence_buf.rstrip().endswith(e) for e in SENTENCE_ENDS) and len(sentence_buf.strip()) >= MIN_SENTENCE_LEN:
                     chunk, sentence_buf = sentence_buf.strip(), ""
-                    # Live caption: the client shows the AI's words as it speaks.
-                    await send_json(websocket, {"type": "ai_text", "text": chunk})
-                    if not await _pipe_tts(chunk):
-                        break
+                    queue.put_nowait(chunk)
             if speaking["on"] and sentence_buf.strip():
-                await send_json(websocket, {"type": "ai_text", "text": sentence_buf.strip()})
-                await _pipe_tts(sentence_buf.strip())
+                queue.put_nowait(sentence_buf.strip())
+            queue.put_nowait(None)
+            await worker
             if speaking["on"]:
                 await send_json(websocket, {"type": "tts_done"})
         except Exception as e:
@@ -200,6 +215,12 @@ async def websocket_session(
             logger.error("AI turn error: %s", e)
             await send_json(websocket, {"type": "error", "message": "The coach hit a snag — please continue."})
         finally:
+            if not worker.done():
+                queue.put_nowait(None)
+                try:
+                    await worker
+                except Exception:
+                    pass
             speaking["on"] = False
             nudge_state["last_ai_done"] = time.time()
             nudge_state["nudged"] = False
@@ -276,16 +297,33 @@ async def websocket_session(
         except Exception:
             pass  # history persistence is best-effort
 
-    async def run_delivery_analysis(audio_bytes: bytes, duration_sec: float) -> None:
+    async def run_delivery_analysis(audio_bytes: bytes, duration_sec: float, transcript: str = "") -> None:
         """Gemma 4 sidecar: hear the answer, store the judgment, maybe coach live."""
         t0 = time.time()
-        note = await analyze_delivery(audio_bytes, duration_sec)
+        note = await analyze_delivery(audio_bytes, duration_sec, transcript)
         if not note:
             return
         delivery_notes.append(note)
         log_event("gemma_audio", user_id=user_id, session_id=session_db_id,
                   latency_ms=int((time.time() - t0) * 1000),
                   detail={"confidence": note.get("confidence"), "hesitancy": note.get("hesitancy")})
+
+        # Pronunciation heatmap: per-word verdicts judged from the ACTUAL audio.
+        # The app colors these words in the user's caption bubble when this
+        # lands (async overlay — arrives after the reply, never blocks it).
+        words = note.get("word_scores")
+        if isinstance(words, list) and words and transcript:
+            clean = [
+                {"word": w.get("word", ""), "issue": w.get("issue", "")}
+                for w in words
+                if isinstance(w, dict) and w.get("word")
+            ][:4]
+            if clean:
+                await send_json(websocket, {
+                    "type": "pronunciation",
+                    "text": transcript,
+                    "words": clean,
+                })
 
         # Proactive live tip — throttled to at most one every 2 turns so the
         # coach feels attentive, not naggy. Rendered by the existing card UI.
@@ -476,7 +514,7 @@ async def websocket_session(
                 # grammar check (correction card) + Gemma 4 delivery analysis.
                 analysis_tasks.append(asyncio.create_task(run_grammar_check(transcript)))
                 analysis_tasks.append(asyncio.create_task(
-                    run_delivery_analysis(audio_bytes, stt.duration_sec)))
+                    run_delivery_analysis(audio_bytes, stt.duration_sec, transcript)))
                 gen_task = asyncio.create_task(speak_ai_turn(None))
 
             elif msg_type == "interrupt":
