@@ -68,9 +68,11 @@ def _b64(pcm: bytes) -> str:
     return base64.b64encode(pcm).decode("utf-8")
 
 
-def build_system_prompt(mode: str, role: str, cefr: str, accent: str) -> str:
+def build_system_prompt(mode: str, role: str, cefr: str, accent: str,
+                        top_errors: Optional[list] = None) -> str:
     # Single-mode product: the app always sends "coach" (adaptive conversation
-    # coaching). Older modes remain callable for API compatibility.
+    # coaching), grounded in the coaching knowledge base + this learner's data.
+    # Older modes remain callable for API compatibility.
     if mode == "interview":
         return build_interview_prompt(domain=role or "general")
     if mode == "speech":
@@ -79,7 +81,8 @@ def build_system_prompt(mode: str, role: str, cefr: str, accent: str) -> str:
         return build_professional_prompt(cefr, accent)
     if mode == "conversation":
         return build_conversation_prompt(cefr, accent)
-    return build_coach_prompt(cefr, accent)
+    # 'role' doubles as the session focus for coach mode (general/interview/...).
+    return build_coach_prompt(cefr, accent, focus=role or "general", top_errors=top_errors)
 
 
 @router.websocket("/ws/{session_id}")
@@ -146,7 +149,23 @@ async def websocket_session(
         return
     log_event("session_started", user_id=user_id, session_id=session_db_id, detail={"mode": mode})
 
-    system_prompt = build_system_prompt(mode, role, cefr, accent)
+    # Ground the coach in this learner's real recurring weak spots.
+    top_errors: list[str] = []
+    try:
+        er = (
+            supabase.table("errors")
+            .select("error_type")
+            .eq("user_id", user_id)
+            .eq("resolved", False)
+            .order("recurrence_count", desc=True)
+            .limit(4)
+            .execute()
+        )
+        top_errors = [row["error_type"] for row in (er.data or []) if row.get("error_type")]
+    except Exception:
+        pass
+
+    system_prompt = build_system_prompt(mode, role, cefr, accent, top_errors)
 
     # In-memory session state (no Redis needed for a single connection).
     history: list[dict] = []

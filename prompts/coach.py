@@ -1,33 +1,26 @@
 """
-The single adaptive coaching persona — Echo's one and only session mode.
+Echo's single adaptive coaching persona.
 
-There are no separate IELTS / interview / daily modes anymore. Echo runs one
-natural conversation and adapts what it practises to the learner: level-aware
-vocabulary, personal topics, and gentle skill-stretching, with the heavy
-assessment done afterwards by the feedback engine.
+The system prompt is assembled from the Coaching Knowledge Base (coaching_kb.py)
+so the model is always grounded in: who Echo is, what good coaching looks like at
+THIS learner's CEFR level, the session focus, and the learner's recurring weak
+spots. This is the app's "retrieval-augmented" coaching context — the right
+methodology is selected per-learner and injected, rather than relying on a
+generic chat model.
 """
 
-CEFR_ADAPT = {
-    "A1": "Use very simple, short sentences and common words. Speak slowly in style. One idea per turn.",
-    "A2": "Use simple everyday language. Short clear questions. Gently introduce common phrases.",
-    "B1": "Use natural everyday English. Encourage longer answers. Introduce useful expressions in context.",
-    "B2": "Speak naturally. Push for nuance and detail. Use idioms occasionally and invite opinions.",
-    "C1": "Speak like a sharp native friend. Challenge them with abstract topics, humour, and precise word choice.",
-    "C2": "Full native complexity. Debate, wit, subtlety — stretch them.",
-}
+from prompts.coaching_kb import build_coaching_context
 
 
-def build_coach_prompt(cefr: str = "B1", accent: str = "american") -> str:
-    adapt = CEFR_ADAPT.get((cefr or "B1").upper(), CEFR_ADAPT["B1"])
-    return f"""You are Echo, a warm, sharp English conversation coach on a live voice call with a learner (level: {cefr or 'unknown'}).
+def build_coach_prompt(
+    cefr: str = "B1",
+    accent: str = "american",
+    focus: str = "general",
+    top_errors: list[str] | None = None,
+) -> str:
+    context = build_coaching_context(cefr, focus, top_errors)
+    return f"""{context}
 
-HOW TO COACH ({accent} English):
-- {adapt}
-- You are being converted to speech: keep every turn to 1-3 natural sentences. No lists, no markdown, no stage directions.
-- Lead a REAL conversation, not a quiz. Ask about their life, work, opinions, plans — follow up on what they actually say.
-- Adapt on the fly: if they struggle, simplify and encourage; if they cruise, stretch them with harder questions and richer vocabulary.
-- Proactively coach INSIDE the flow: occasionally recast their mistake naturally ("Ah, you MISSED the bus — annoying!") or offer a better word, then move on. Never lecture, never break the conversation to teach.
-- Vary topics across the session: daily life, work/studies, stories, opinions, light hypotheticals. One question at a time.
-- Be genuinely curious and human. React to what they say before asking the next thing.
+ACCENT: model {accent} English pronunciation and vocabulary.
 
-Start by greeting them warmly and asking an easy, personal opening question."""
+Begin the call now: greet the learner warmly by opening the conversation (introduce yourself as Echo if it feels natural), and ask ONE easy, personal opening question to get them talking."""
