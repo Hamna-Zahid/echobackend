@@ -41,6 +41,9 @@ async def register(req: RegisterRequest):
             "email": req.email,
             "password": req.password,
             "email_confirm": True,
+            # Store the display name in auth metadata so the app can show it
+            # without a separate profile fetch or schema dependency.
+            "user_metadata": {"full_name": req.full_name} if req.full_name else {},
         })
         if res.user is None:
             raise HTTPException(status_code=400, detail="Registration failed")

@@ -25,6 +25,7 @@ import base64
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -66,6 +67,35 @@ async def send_json(ws: WebSocket, data: dict):
 
 def _b64(pcm: bytes) -> str:
     return base64.b64encode(pcm).decode("utf-8")
+
+
+def _words(s: str) -> set:
+    return set(re.findall(r"[a-z']+", (s or "").lower()))
+
+
+# Common Whisper hallucinations on silence / speaker-bleed audio.
+_HALLUCINATIONS = {
+    "thank you", "thanks for watching", "thank you for watching", "thank you.",
+    "you", "bye", "bye.", ".", "please subscribe", "subscribe",
+    "thanks", "okay", "ok", "mm", "hmm", "uh", "um",
+}
+
+
+def _is_echo_or_noise(transcript: str, last_ai: str) -> bool:
+    """True if the transcript is likely the phone's mic catching the AI's own
+    voice (speaker bleed) or a Whisper hallucination on near-silence, rather
+    than a real user turn."""
+    t = transcript.strip().lower()
+    if not t or t in _HALLUCINATIONS:
+        return True
+    ut = _words(transcript)
+    if len(ut) < 2:  # single-word "turns" are almost always noise/bleed
+        return True
+    if last_ai:
+        at = _words(last_ai)
+        if at and len(ut & at) / len(ut) > 0.6:  # mostly the AI's own words
+            return True
+    return False
 
 
 def build_system_prompt(mode: str, role: str, cefr: str, accent: str,
@@ -398,13 +428,13 @@ async def websocket_session(
         metrics = compute_delivery_metrics(metrics_acc["words"], metrics_acc["seconds"], metrics_acc["fillers"])
         report = None
         t_fb = time.time()
-        # Let any in-flight audio analyses land so the scorecard reflects the
-        # last turn too. Gemini audio judgment runs ~15s, so give it room —
-        # this wait happens behind the app's "Analyzing…" screen, not mid-chat.
+        # Briefly let in-flight audio analyses land, but keep ending snappy —
+        # a long wait here is what made "End" feel slow. Earlier turns' analyses
+        # have usually already completed during the conversation.
         if analysis_tasks:
             try:
                 await asyncio.wait_for(
-                    asyncio.gather(*analysis_tasks, return_exceptions=True), timeout=16.0)
+                    asyncio.gather(*analysis_tasks, return_exceptions=True), timeout=2.0)
             except asyncio.TimeoutError:
                 pass
         try:
@@ -519,6 +549,15 @@ async def websocket_session(
                 if not transcript:
                     continue
 
+                # Guard against the AI answering its own voice (speaker bleed) or
+                # a Whisper hallucination on near-silence — the #1 cause of the
+                # "AI repeats itself / invents sentences" failure.
+                last_ai = next((h["content"] for h in reversed(history) if h.get("role") == "assistant"), "")
+                if _is_echo_or_noise(transcript, last_ai):
+                    log_event("stt", status="dropped", user_id=user_id, session_id=session_db_id,
+                              detail={"reason": "echo_or_noise", "text": transcript[:80]})
+                    continue
+
                 # Show the user their own recognized words in the live transcript.
                 await send_json(websocket, {"type": "user_text", "text": transcript})
 
@@ -531,9 +570,9 @@ async def websocket_session(
                 history.append({"role": "user", "content": transcript})
                 tip_state["turn"] += 1
                 nudge_state["nudged"] = True  # user spoke — cancel pending nudge this turn
-                # Sidecars run in parallel — neither blocks the spoken reply:
-                # grammar check (correction card) + Gemma 4 delivery analysis.
-                analysis_tasks.append(asyncio.create_task(run_grammar_check(transcript)))
+                # Delivery/pronunciation analysis runs in parallel (never blocks
+                # the reply). Grammar correction is now handled by the coach
+                # inside its spoken reply, so no correction cards are sent.
                 analysis_tasks.append(asyncio.create_task(
                     run_delivery_analysis(audio_bytes, stt.duration_sec, transcript)))
                 gen_task = asyncio.create_task(speak_ai_turn(None))
