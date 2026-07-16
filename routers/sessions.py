@@ -107,7 +107,7 @@ async def get_progress(user=Depends(get_current_user)):
         )
     user_res = (
         supabase.table("users")
-        .select("cefr_level, ielts_score, target_exam, preferred_accent")
+        .select("full_name, cefr_level, ielts_score, target_exam, preferred_accent")
         .eq("id", user["id"])
         .single()
         .execute()
