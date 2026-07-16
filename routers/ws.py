@@ -551,9 +551,14 @@ async def websocket_session(
 
                 # Guard against the AI answering its own voice (speaker bleed) or
                 # a Whisper hallucination on near-silence — the #1 cause of the
-                # "AI repeats itself / invents sentences" failure.
-                last_ai = next((h["content"] for h in reversed(history) if h.get("role") == "assistant"), "")
-                if _is_echo_or_noise(transcript, last_ai):
+                # "AI repeats itself / invents sentences" failure. Compare against
+                # the last TWO AI turns: bleed can carry the phone's still-playing
+                # previous line as well as the most recent one.
+                recent_ai = " ".join(
+                    h["content"] for h in
+                    [h for h in reversed(history) if h.get("role") == "assistant"][:2]
+                )
+                if _is_echo_or_noise(transcript, recent_ai):
                     log_event("stt", status="dropped", user_id=user_id, session_id=session_db_id,
                               detail={"reason": "echo_or_noise", "text": transcript[:80]})
                     continue
