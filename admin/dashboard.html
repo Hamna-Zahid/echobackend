@@ -8,9 +8,11 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
   :root{
-    --bg:#0f1115; --panel:#171a21; --panel2:#1d212b; --line:#262b36;
-    --text:#e6e9ef; --muted:#8b93a7; --accent:#E11D74; --accent2:#7C3AED;
-    --ok:#10b981; --warn:#f59e0b; --err:#ef4444;
+    /* Light theme, matched to the Echo brand (rose accent on a clean white base) */
+    --bg:#F6F7F9; --panel:#FFFFFF; --panel2:#F2F4F7; --line:#E4E7EC;
+    --text:#111827; --muted:#6B7280; --accent:#E11D74; --accent2:#7C3AED;
+    --ok:#059669; --warn:#D97706; --err:#DC2626;
+    --shadow:0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.06);
   }
   *{box-sizing:border-box}
   body{margin:0;font-family:Inter,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text);font-size:14px}
@@ -19,7 +21,7 @@
 
   /* Login */
   #login{min-height:100vh;display:flex;align-items:center;justify-content:center}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
   #login .card{width:340px;padding:28px}
   #login h1{margin:0 0 4px;font-size:20px}
   #login p{margin:0 0 20px;color:var(--muted);font-size:13px}
@@ -54,21 +56,23 @@
   /* Tables */
   .toolbar{display:flex;gap:10px;margin-bottom:12px}
   .toolbar input,.toolbar select{margin:0;max-width:280px}
-  table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:var(--shadow)}
+  tbody tr:last-child td{border-bottom:none}
+  thead th{background:var(--panel2)}
   th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--line);font-size:13px}
   th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.3px}
   tbody tr{cursor:pointer}
   tbody tr:hover{background:var(--panel2)}
   td.mono{font-family:ui-monospace,monospace;font-size:12px;color:var(--muted)}
   .pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:600}
-  .pill.ok{background:rgba(16,185,129,.15);color:var(--ok)}
-  .pill.err{background:rgba(239,68,68,.15);color:var(--err)}
-  .pill.warn{background:rgba(245,158,11,.15);color:var(--warn)}
-  .pill.mode{background:var(--panel2);color:var(--text)}
+  .pill.ok{background:#D1FAE5;color:#047857}
+  .pill.err{background:#FEE2E2;color:#B91C1C}
+  .pill.warn{background:#FEF3C7;color:#B45309}
+  .pill.mode{background:var(--panel2);color:var(--text);border:1px solid var(--line)}
   .score{font-weight:700}
 
   /* Modal */
-  #modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto;z-index:50}
+  #modal{position:fixed;inset:0;background:rgba(17,24,39,.45);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto;z-index:50}
   #modal .card{width:760px;max-width:100%;padding:22px}
   .modal-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
   .modal-head h3{margin:0;font-size:16px}
@@ -199,18 +203,20 @@ async function viewOverview(){
   drawLine("cTime", ts.labels, ts.signups, ts.sessions);
   drawDoughnut("cMode", d.mode_breakdown);
 }
+// Chart palette — kept in sync with the light theme above.
+const TICK="#6B7280", GRID="#E4E7EC";
 function drawLine(id,labels,a,b){
   if(CHARTS[id])CHARTS[id].destroy();
   CHARTS[id]=new Chart($("#"+id),{type:"line",data:{labels,datasets:[
     {label:"Signups",data:a,borderColor:"#7C3AED",backgroundColor:"transparent",tension:.3},
     {label:"Sessions",data:b,borderColor:"#E11D74",backgroundColor:"transparent",tension:.3}]},
-    options:{plugins:{legend:{labels:{color:"#8b93a7"}}},scales:{x:{ticks:{color:"#8b93a7",maxTicksLimit:8},grid:{color:"#262b36"}},y:{ticks:{color:"#8b93a7"},grid:{color:"#262b36"}}}}});
+    options:{plugins:{legend:{labels:{color:TICK}}},scales:{x:{ticks:{color:TICK,maxTicksLimit:8},grid:{color:GRID}},y:{ticks:{color:TICK},grid:{color:GRID}}}}});
 }
 function drawDoughnut(id,obj){
   if(CHARTS[id])CHARTS[id].destroy();
   const labels=Object.keys(obj), data=Object.values(obj);
-  CHARTS[id]=new Chart($("#"+id),{type:"doughnut",data:{labels,datasets:[{data,backgroundColor:["#E11D74","#7C3AED","#6366F1","#0D9488","#D97706","#0EA5E9"]}]},
-    options:{plugins:{legend:{position:"bottom",labels:{color:"#8b93a7"}}}}});
+  CHARTS[id]=new Chart($("#"+id),{type:"doughnut",data:{labels,datasets:[{data,backgroundColor:["#E11D74","#7C3AED","#6366F1","#0D9488","#D97706","#0EA5E9"],borderColor:"#fff",borderWidth:2}]},
+    options:{plugins:{legend:{position:"bottom",labels:{color:TICK}}}}});
 }
 
 // ── USERS ────────────────────────────────────────────────────────────────
@@ -342,7 +348,7 @@ function drawCostBar(id, st){
     labels:["LLM","Feedback","Audio (Gemini)","STT (Whisper)"],
     datasets:[{label:"Est. cost (USD)",data:[st.llm.cost_usd,st.feedback.cost_usd,st.gemma_audio.cost_usd,st.stt.cost_usd],
       backgroundColor:["#E11D74","#7C3AED","#6366F1","#0D9488"]}]},
-    options:{plugins:{legend:{display:false}},scales:{x:{ticks:{color:"#8b93a7"},grid:{color:"#262b36"}},y:{ticks:{color:"#8b93a7"},grid:{color:"#262b36"}}}}});
+    options:{plugins:{legend:{display:false}},scales:{x:{ticks:{color:TICK},grid:{color:GRID}},y:{ticks:{color:TICK},grid:{color:GRID}}}}});
 }
 
 // ── HEALTH ───────────────────────────────────────────────────────────────
