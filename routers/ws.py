@@ -39,7 +39,7 @@ from services.stt import transcribe_audio_full
 from services.llm import stream_conversation, run_correction_check
 from services.tts import stream_tts
 from services.feedback import compute_delivery_metrics, generate_session_feedback
-from services.gemma_audio import analyze_delivery, format_delivery_notes
+from services.gemma_audio import analyze_delivery, format_delivery_notes, GEMMA_MODEL as GEMMA_MODEL_NAME
 from services.events import log_event
 from prompts.coach import build_coach_prompt
 from prompts.interview import build_interview_prompt
@@ -231,6 +231,7 @@ async def websocket_session(
         speaking["on"] = True
         sentence_buf = ""
         full = ""
+        llm_usage: dict = {}
         queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
 
         async def tts_worker() -> None:
@@ -245,7 +246,7 @@ async def websocket_session(
 
         worker = asyncio.create_task(tts_worker())
         try:
-            async for token in stream_conversation(system_prompt, history, user_message):
+            async for token in stream_conversation(system_prompt, history, user_message, usage_sink=llm_usage):
                 if not speaking["on"]:
                     break
                 sentence_buf += token
@@ -275,6 +276,15 @@ async def websocket_session(
             nudge_state["nudged"] = False
         if full.strip():
             history.append({"role": "assistant", "content": full.strip()})
+        # Usage/cost telemetry: Groq LLM tokens for this turn + characters sent
+        # to (free) Edge TTS. Powers the admin usage & cost panel.
+        log_event("llm", user_id=user_id, session_id=session_db_id, detail={
+            "model": llm_usage.get("model", "llama-3.3-70b-versatile"),
+            "prompt_tokens": llm_usage.get("prompt_tokens", 0),
+            "completion_tokens": llm_usage.get("completion_tokens", 0),
+            "total_tokens": llm_usage.get("total_tokens", 0),
+            "tts_chars": len(full.strip()),
+        })
 
     async def _pipe_tts(sentence: str) -> bool:
         async for audio_chunk in stream_tts(sentence, accent=accent):
@@ -349,13 +359,18 @@ async def websocket_session(
     async def run_delivery_analysis(audio_bytes: bytes, duration_sec: float, transcript: str = "") -> None:
         """Gemma 4 sidecar: hear the answer, store the judgment, maybe coach live."""
         t0 = time.time()
-        note = await analyze_delivery(audio_bytes, duration_sec, transcript)
+        gem_usage: dict = {}
+        note = await analyze_delivery(audio_bytes, duration_sec, transcript, usage_sink=gem_usage)
         if not note:
             return
         delivery_notes.append(note)
         log_event("gemma_audio", user_id=user_id, session_id=session_db_id,
                   latency_ms=int((time.time() - t0) * 1000),
-                  detail={"confidence": note.get("confidence"), "hesitancy": note.get("hesitancy")})
+                  detail={"confidence": note.get("confidence"), "hesitancy": note.get("hesitancy"),
+                          "model": gem_usage.get("model", GEMMA_MODEL_NAME),
+                          "prompt_tokens": gem_usage.get("prompt_tokens", 0),
+                          "completion_tokens": gem_usage.get("completion_tokens", 0),
+                          "total_tokens": gem_usage.get("total_tokens", 0)})
 
         # Pronunciation heatmap: per-word verdicts judged from the ACTUAL audio.
         # The app colors these words in the user's caption bubble when this
@@ -437,11 +452,16 @@ async def websocket_session(
                     asyncio.gather(*analysis_tasks, return_exceptions=True), timeout=2.0)
             except asyncio.TimeoutError:
                 pass
+        fb_usage: dict = {}
         try:
-            report = await generate_session_feedback(mode, history, metrics, delivery_notes)
+            report = await generate_session_feedback(mode, history, metrics, delivery_notes, usage_sink=fb_usage)
             log_event("feedback", status="ok" if report else "skipped",
                       user_id=user_id, session_id=session_db_id,
-                      latency_ms=int((time.time() - t_fb) * 1000))
+                      latency_ms=int((time.time() - t_fb) * 1000),
+                      detail={"model": fb_usage.get("model", "llama-3.3-70b-versatile"),
+                              "prompt_tokens": fb_usage.get("prompt_tokens", 0),
+                              "completion_tokens": fb_usage.get("completion_tokens", 0),
+                              "total_tokens": fb_usage.get("total_tokens", 0)})
         except Exception as e:
             log_event("feedback", status="error", user_id=user_id, session_id=session_db_id, detail={"error": str(e)})
             report = None
@@ -539,8 +559,11 @@ async def websocket_session(
                 t_stt = time.time()
                 try:
                     stt = await transcribe_audio_full(audio_bytes)
+                    # Groq Whisper is billed by audio duration — track seconds
+                    # for the admin usage/cost panel.
                     log_event("stt", user_id=user_id, session_id=session_db_id,
-                              latency_ms=int((time.time() - t_stt) * 1000))
+                              latency_ms=int((time.time() - t_stt) * 1000),
+                              detail={"audio_seconds": round(stt.duration_sec, 2)})
                 except Exception as e:
                     log_event("stt", status="error", user_id=user_id, session_id=session_db_id, detail={"error": str(e)})
                     await send_json(websocket, {"type": "error", "message": "Didn't catch that — please try speaking again."})

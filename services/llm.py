@@ -36,10 +36,14 @@ async def stream_conversation(
     system_prompt: str,
     history: list[dict],
     user_message: str | None = None,
+    usage_sink: dict | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     Stream the AI's next spoken turn (interviewer question, follow-up, or partner
     reply). `history` is the running list of {role, content} turns.
+
+    If `usage_sink` is given, the Groq token usage (prompt/completion/total) from
+    the final stream chunk is written into it for the admin usage/cost panel.
     """
     messages = [{"role": "system", "content": system_prompt}]
     for turn in history[-40:]:
@@ -59,11 +63,42 @@ async def stream_conversation(
             top_p=0.9,
         )
         async for chunk in stream:
+            _capture_stream_usage(chunk, usage_sink, CONVERSATION_MODEL)
+            # The final usage chunk can carry an empty choices list — guard it.
+            if not chunk.choices:
+                continue
             delta = chunk.choices[0].delta
             if delta and delta.content:
                 yield delta.content
     except Exception:
         yield "Sorry, could you repeat that?"
+
+
+def _capture_stream_usage(chunk, sink: dict | None, model: str) -> None:
+    """Groq streams token usage on the final chunk under `x_groq.usage`."""
+    if sink is None:
+        return
+    xg = getattr(chunk, "x_groq", None)
+    usage = getattr(xg, "usage", None) if xg is not None else None
+    if usage is None:
+        return
+    sink["model"] = model
+    sink["prompt_tokens"] = int(getattr(usage, "prompt_tokens", 0) or 0)
+    sink["completion_tokens"] = int(getattr(usage, "completion_tokens", 0) or 0)
+    sink["total_tokens"] = int(getattr(usage, "total_tokens", 0) or 0)
+
+
+def _capture_response_usage(response, sink: dict | None, model: str) -> None:
+    """Non-streaming Groq calls expose usage directly on the response."""
+    if sink is None:
+        return
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return
+    sink["model"] = model
+    sink["prompt_tokens"] = int(getattr(usage, "prompt_tokens", 0) or 0)
+    sink["completion_tokens"] = int(getattr(usage, "completion_tokens", 0) or 0)
+    sink["total_tokens"] = int(getattr(usage, "total_tokens", 0) or 0)
 
 
 # ── Stream C: live grammar correction check ──────────────────────────────────
@@ -106,10 +141,15 @@ async def run_correction_check(utterance: str) -> dict | None:
 
 # ── Feedback engine: structured scoring (the part people pay for) ─────────────
 
-async def generate_feedback_json(system_prompt: str, user_payload: str) -> dict | None:
+async def generate_feedback_json(
+    system_prompt: str,
+    user_payload: str,
+    usage_sink: dict | None = None,
+) -> dict | None:
     """
     Call Llama 3.3 70B in JSON mode to produce the structured coaching report.
-    Returns a dict, or None on failure.
+    Returns a dict, or None on failure. Token usage (if `usage_sink` is given)
+    is captured for the admin usage/cost panel.
     """
     try:
         client = get_groq_client()
@@ -124,6 +164,7 @@ async def generate_feedback_json(system_prompt: str, user_payload: str) -> dict 
             temperature=0.2,
             response_format={"type": "json_object"},
         )
+        _capture_response_usage(response, usage_sink, FEEDBACK_MODEL)
         return json.loads(response.choices[0].message.content)
     except Exception:
         # Retry once without JSON mode, then best-effort parse.

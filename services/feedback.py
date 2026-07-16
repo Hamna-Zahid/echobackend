@@ -49,6 +49,7 @@ async def generate_session_feedback(
     turns: list[dict],
     metrics: dict,
     delivery_notes: list[dict] | None = None,
+    usage_sink: dict | None = None,
 ) -> dict | None:
     """
     Build the structured coaching report. Returns the report dict, or None if
@@ -78,7 +79,7 @@ async def generate_session_feedback(
         f"Produce the JSON scorecard now."
     )
 
-    report = await generate_feedback_json(FEEDBACK_SYSTEM, payload)
+    report = await generate_feedback_json(FEEDBACK_SYSTEM, payload, usage_sink=usage_sink)
     if not report:
         return None
 

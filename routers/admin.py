@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
 from db.supabase import get_admin_client, get_current_user
+from services.usage import summarize_events, token_cost, STT_USD_PER_SECOND
 
 router = APIRouter()
 
@@ -330,6 +331,66 @@ async def timeseries(days: int = Query(30, le=90), admin: dict = Depends(require
         "signups": [signups.get(d, 0) for d in labels],
         "sessions": [sess.get(d, 0) for d in labels],
     }
+
+
+# ── Usage & cost ──────────────────────────────────────────────────────────────
+
+@router.get("/admin/api/usage")
+async def usage(days: int = Query(30, le=90), admin: dict = Depends(require_admin)):
+    """
+    Token consumption + estimated cost across every AI stage, plus the top
+    token-consuming users. Fed by the per-turn token counts logged into
+    app_events.detail by the session pipeline.
+    """
+    sb = get_admin_client()
+    since = _now() - timedelta(days=days)
+    events = (
+        sb.table("app_events")
+        .select("event_type, user_id, detail, created_at")
+        .in_("event_type", ["llm", "feedback", "gemma_audio", "stt"])
+        .gte("created_at", since.isoformat())
+        .limit(50000)
+        .execute().data or []
+    )
+
+    report = summarize_events(events)
+
+    # Per-user token + cost leaderboard (who is burning quota).
+    per_user: dict = {}
+    for e in events:
+        uid = e.get("user_id")
+        if not uid:
+            continue
+        d = e.get("detail") or {}
+        if not isinstance(d, dict):
+            continue
+        u = per_user.setdefault(uid, {"tokens": 0, "cost_usd": 0.0, "stt_seconds": 0.0})
+        et = e.get("event_type")
+        if et in ("llm", "feedback", "gemma_audio"):
+            pt = int(d.get("prompt_tokens") or 0)
+            ct = int(d.get("completion_tokens") or 0)
+            u["tokens"] += pt + ct
+            u["cost_usd"] += token_cost(d.get("model") or "_default", pt, ct)
+        elif et == "stt":
+            secs = float(d.get("audio_seconds") or 0.0)
+            u["stt_seconds"] += secs
+            u["cost_usd"] += secs * STT_USD_PER_SECOND
+
+    emails = _email_map(sb)
+    top_users = sorted(per_user.items(), key=lambda kv: kv[1]["tokens"], reverse=True)[:15]
+    report["top_users"] = [
+        {
+            "user_id": uid,
+            "email": emails.get(uid),
+            "tokens": v["tokens"],
+            "stt_seconds": round(v["stt_seconds"], 1),
+            "cost_usd": round(v["cost_usd"], 4),
+        }
+        for uid, v in top_users
+    ]
+    report["window_days"] = days
+    report["generated_at"] = _now().isoformat()
+    return report
 
 
 # ── Dashboard HTML ────────────────────────────────────────────────────────────

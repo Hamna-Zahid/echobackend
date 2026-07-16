@@ -84,12 +84,20 @@ def is_configured() -> bool:
     return bool(os.environ.get("GEMINI_API_KEY"))
 
 
-async def analyze_delivery(audio_bytes: bytes, duration_sec: float, transcript: str = "") -> Optional[dict]:
+async def analyze_delivery(
+    audio_bytes: bytes,
+    duration_sec: float,
+    transcript: str = "",
+    usage_sink: Optional[dict] = None,
+) -> Optional[dict]:
     """
     Send one utterance's audio + its transcript to Gemma 4 and get a delivery
     judgment including per-word pronunciation verdicts (the heatmap payload).
     Returns the parsed dict, or None whenever anything prevents analysis
     (no key, clip too long/short, network/quota error, bad response).
+
+    If `usage_sink` is given, Gemini's token usageMetadata is written into it
+    for the admin usage/cost panel.
     """
     api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key or not audio_bytes:
@@ -129,6 +137,12 @@ async def analyze_delivery(audio_bytes: bytes, duration_sec: float, transcript: 
             return None
 
         data = res.json()
+        if usage_sink is not None:
+            um = data.get("usageMetadata") or {}
+            usage_sink["model"] = GEMMA_MODEL
+            usage_sink["prompt_tokens"] = int(um.get("promptTokenCount", 0) or 0)
+            usage_sink["completion_tokens"] = int(um.get("candidatesTokenCount", 0) or 0)
+            usage_sink["total_tokens"] = int(um.get("totalTokenCount", 0) or 0)
         parts = (data.get("candidates") or [{}])[0].get("content", {}).get("parts", [])
         text = next((p["text"] for p in parts if isinstance(p, dict) and p.get("text")), "")
         start, end = text.find("{"), text.rfind("}")
