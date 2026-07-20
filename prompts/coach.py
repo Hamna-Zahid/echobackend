@@ -35,9 +35,10 @@ def build_coach_prompt(
         )
     else:
         opening = (
-            "Begin the call now: greet the learner warmly (introduce yourself as Echo), "
-            "and ask ONE easy, personal opening question to get them talking — including "
-            "what they'd like to practise or talk about today."
+            "Begin the call now. This is your FIRST EVER conversation with this learner — "
+            "you have never spoken before, so do NOT say things like 'again', 'as always' "
+            "or 'good to catch up'. Introduce yourself as Echo, then ask ONE easy opening "
+            "question that invites them to say what they'd like to talk about or practise today."
         )
 
     return f"""{context}{memory_block}
