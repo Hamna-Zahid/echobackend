@@ -17,10 +17,31 @@ def build_coach_prompt(
     accent: str = "american",
     focus: str = "general",
     top_errors: list[str] | None = None,
+    memory_context: str = "",
+    learner_name: str = "",
 ) -> str:
     context = build_coaching_context(cefr, focus, top_errors)
-    return f"""{context}
+    memory_block = f"\n\n{memory_context}" if memory_context else ""
+    name_line = f"\nTHE LEARNER'S NAME: {learner_name} — use it naturally." if learner_name else ""
 
+    # A returning learner must never get the cold-open script; the memory block
+    # tells the model to resume the relationship instead.
+    if memory_context:
+        opening = (
+            "Begin the call now: greet them by name like a coach who already knows them, "
+            "refer to something specific you remember from last time, and ask what they'd "
+            "like to talk about or work on today. Do NOT introduce yourself again and do "
+            "NOT use a generic scripted opener."
+        )
+    else:
+        opening = (
+            "Begin the call now: greet the learner warmly (introduce yourself as Echo), "
+            "and ask ONE easy, personal opening question to get them talking — including "
+            "what they'd like to practise or talk about today."
+        )
+
+    return f"""{context}{memory_block}
+{name_line}
 ACCENT: model {accent} English pronunciation and vocabulary.
 
-Begin the call now: greet the learner warmly by opening the conversation (introduce yourself as Echo if it feels natural), and ask ONE easy, personal opening question to get them talking."""
+{opening}"""

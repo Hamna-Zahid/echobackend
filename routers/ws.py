@@ -42,6 +42,7 @@ from services.tts import stream_tts
 from services.feedback import compute_delivery_metrics, generate_session_feedback
 from services.gemma_audio import analyze_delivery, format_delivery_notes, GEMMA_MODEL as GEMMA_MODEL_NAME
 from services.events import log_event
+from services.memory import load_memory, build_memory_context, update_after_session
 from prompts.coach import build_coach_prompt
 from prompts.interview import build_interview_prompt
 from prompts.speech import build_speech_prompt
@@ -121,7 +122,8 @@ def _is_echo_or_noise(transcript: str, recent_ai: list) -> bool:
 
 
 def build_system_prompt(mode: str, role: str, cefr: str, accent: str,
-                        top_errors: Optional[list] = None) -> str:
+                        top_errors: Optional[list] = None,
+                        memory_context: str = "", learner_name: str = "") -> str:
     # Single-mode product: the app always sends "coach" (adaptive conversation
     # coaching), grounded in the coaching knowledge base + this learner's data.
     # Older modes remain callable for API compatibility.
@@ -134,7 +136,8 @@ def build_system_prompt(mode: str, role: str, cefr: str, accent: str,
     if mode == "conversation":
         return build_conversation_prompt(cefr, accent)
     # 'role' doubles as the session focus for coach mode (general/interview/...).
-    return build_coach_prompt(cefr, accent, focus=role or "general", top_errors=top_errors)
+    return build_coach_prompt(cefr, accent, focus=role or "general", top_errors=top_errors,
+                              memory_context=memory_context, learner_name=learner_name)
 
 
 @router.websocket("/ws/{session_id}")
@@ -217,7 +220,15 @@ async def websocket_session(
     except Exception:
         pass
 
-    system_prompt = build_system_prompt(mode, role, cefr, accent, top_errors)
+    # ── RAG: retrieve this learner's long-term memory and ground the coach in it
+    # so the session continues the relationship instead of restarting it.
+    learner_memory = load_memory(user_id)
+    memory_context = build_memory_context(learner_memory)
+    learner_name = (user_data.get("full_name") or "").split(" ")[0] if user_data.get("full_name") else ""
+
+    system_prompt = build_system_prompt(mode, role, cefr, accent, top_errors,
+                                        memory_context=memory_context,
+                                        learner_name=learner_name)
 
     # In-memory session state (no Redis needed for a single connection).
     history: list[dict] = []
@@ -528,6 +539,11 @@ async def websocket_session(
                 }).eq("id", user_id).execute()
             except Exception:
                 pass
+
+        # Fold this session into the learner's long-term memory so the next
+        # session can pick the conversation up instead of starting cold.
+        if len(history) >= 2:
+            await update_after_session(user_id, learner_memory, transcript_text, duration_seconds)
 
         log_event("session_completed", user_id=user_id, session_id=session_db_id,
                   latency_ms=duration_seconds * 1000,
