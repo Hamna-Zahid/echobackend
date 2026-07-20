@@ -29,6 +29,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
@@ -69,31 +70,52 @@ def _b64(pcm: bytes) -> str:
     return base64.b64encode(pcm).decode("utf-8")
 
 
-def _words(s: str) -> set:
-    return set(re.findall(r"[a-z']+", (s or "").lower()))
+def _norm_words(s: str) -> list:
+    return re.findall(r"[a-z']+", (s or "").lower())
 
 
-# Common Whisper hallucinations on silence / speaker-bleed audio.
+# Phrases Whisper invents on silence / near-silence. Matched on the WHOLE
+# transcript only, never as a substring of a real sentence.
 _HALLUCINATIONS = {
-    "thank you", "thanks for watching", "thank you for watching", "thank you.",
-    "you", "bye", "bye.", ".", "please subscribe", "subscribe",
-    "thanks", "okay", "ok", "mm", "hmm", "uh", "um",
+    "thank you", "thanks for watching", "thank you for watching",
+    "please subscribe", "subscribe", "bye", "you",
+    "thanks", "mm", "hmm", "uh", "um", "mhm", "ah",
 }
 
 
-def _is_echo_or_noise(transcript: str, last_ai: str) -> bool:
-    """True if the transcript is likely the phone's mic catching the AI's own
-    voice (speaker bleed) or a Whisper hallucination on near-silence, rather
-    than a real user turn."""
-    t = transcript.strip().lower()
-    if not t or t in _HALLUCINATIONS:
+def _is_echo_or_noise(transcript: str, recent_ai: list) -> bool:
+    """
+    True only when the transcript is almost certainly NOT a real user turn:
+    either a Whisper hallucination on silence, or the phone's mic catching the
+    AI's own voice (speaker bleed).
+
+    Speaker bleed is a near-VERBATIM repeat of what the AI just said, so it is
+    detected with sequence similarity. An earlier version compared bag-of-word
+    overlap, which wrongly dropped ordinary replies that merely reused common
+    words ("I", "you", "so", "today") — i.e. the coach went deaf. Never
+    reintroduce a plain word-overlap test here.
+    """
+    t = transcript.strip().lower().strip(".!?,")
+    if not t:
         return True
-    ut = _words(transcript)
-    if len(ut) < 2:  # single-word "turns" are almost always noise/bleed
+    if t in _HALLUCINATIONS:
         return True
-    if last_ai:
-        at = _words(last_ai)
-        if at and len(ut & at) / len(ut) > 0.6:  # mostly the AI's own words
+
+    words = _norm_words(transcript)
+    if not words:
+        return True
+
+    user_s = " ".join(words)
+    for ai_turn in recent_ai:
+        ai_words = _norm_words(ai_turn)
+        if not ai_words:
+            continue
+        ai_s = " ".join(ai_words)
+        # Word-for-word repeat of the AI's line = speaker bleed.
+        if SequenceMatcher(None, user_s, ai_s).ratio() > 0.75:
+            return True
+        # Or a long contiguous chunk lifted straight out of the AI's line.
+        if len(words) >= 6 and user_s in ai_s:
             return True
     return False
 
@@ -577,10 +599,8 @@ async def websocket_session(
                 # "AI repeats itself / invents sentences" failure. Compare against
                 # the last TWO AI turns: bleed can carry the phone's still-playing
                 # previous line as well as the most recent one.
-                recent_ai = " ".join(
-                    h["content"] for h in
-                    [h for h in reversed(history) if h.get("role") == "assistant"][:2]
-                )
+                recent_ai = [h["content"] for h in reversed(history)
+                             if h.get("role") == "assistant"][:2]
                 if _is_echo_or_noise(transcript, recent_ai):
                     log_event("stt", status="dropped", user_id=user_id, session_id=session_db_id,
                               detail={"reason": "echo_or_noise", "text": transcript[:80]})
