@@ -32,8 +32,10 @@ def _validate_env():
         print("═" * 60 + "\n")
         sys.exit(1)
 
-    tts = os.environ.get("DEV_TTS", "edge").lower()
-    print(f"[Echo] Cascade: Groq Whisper + Llama 3.3 70B + Edge TTS ({tts}) — free tier, no GPU")
+    llm_provider = os.environ.get("LLM_PROVIDER", "groq")
+    asr_model = os.environ.get("ASR_MODEL", "whisper-large-v3-turbo")
+    tts = os.environ.get("TTS_ENGINE", os.environ.get("DEV_TTS", "edge")).lower()
+    print(f"[Echo] ASR={asr_model} | LLM={llm_provider} | TTS={tts} — low-latency tier")
     if os.environ.get("GEMINI_API_KEY"):
         print(f"[Echo] Audio delivery analysis: ON ({os.environ.get('GEMMA_AUDIO_MODEL', 'gemini-flash-latest')})")
     else:
