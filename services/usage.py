@@ -17,6 +17,9 @@ from typing import Iterable
 #    "if we paid list price" numbers for capacity planning. ──────────────────
 PRICING = {
     # Groq LLMs — per 1M tokens (input / output)
+    "openai/gpt-oss-120b":     {"in": 0.15, "out": 0.75},
+    "openai/gpt-oss-20b":      {"in": 0.10, "out": 0.50},
+    # Legacy Groq Llama ids (kept so old logs still price correctly)
     "llama-3.3-70b-versatile": {"in": 0.59, "out": 0.79},
     "llama-3.1-8b-instant":    {"in": 0.05, "out": 0.08},
     # Google Gemini Flash (audio+text) — per 1M tokens (input / output)

@@ -33,3 +33,12 @@ desktop.ini
 *.log
 htmlcov/
 .coverage
+
+# Local scratch / throwaway files (may contain secrets — never commit)
+Untitled
+fix_ws*.py
+*.wav
+*.mp3
+*.m4a
+voices/
+

@@ -73,3 +73,47 @@ app.include_router(admin.router,    tags=["admin"])
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "Echo API"}
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    """Placeholder so that GET / no longer returns 404."""
+    return {"message": "Echo API is running. Use /health for a health check."}
+
+
+@app.get("/json/version", include_in_schema=False)
+async def version():
+    return {"version": "2.0.0"}
+
+
+@app.get("/v1/models", include_in_schema=False)
+async def list_models():
+    """Minimal OpenAI‑compatible model listing (Groq‑only)."""
+    return {
+        "data": [
+            {
+                "id": "whisper-large-v3",
+                "object": "model",
+                "created": 2024,
+                "owned_by": "groq",
+            },
+            {
+                "id": "whisper-large-v3-turbo",
+                "object": "model",
+                "created": 2024,
+                "owned_by": "groq",
+            },
+            {
+                "id": "openai/gpt-oss-120b",
+                "object": "model",
+                "created": 2024,
+                "owned_by": "groq",
+            },
+            {
+                "id": "openai/gpt-oss-20b",
+                "object": "model",
+                "created": 2024,
+                "owned_by": "groq",
+            },
+        ]
+    }

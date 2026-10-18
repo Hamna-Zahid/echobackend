@@ -116,10 +116,15 @@ DOMAIN_PROFILES = {
 
 def build_interview_prompt(
     job_role: str = "software engineer",
-    company: str = "a multinational company",
+    company: str = "a top company",
     domain: str = "general",
     turn_count: int = 0,
+    cefr: str = "B2",
+    accent: str = "american",
+    top_errors: Optional[list] = None,
+    **kwargs,
 ) -> str:
+
     """
     Build a contextual interview prompt.
     domain: one of software_engineer | product_manager | marketing | finance | general

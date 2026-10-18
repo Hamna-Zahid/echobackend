@@ -13,11 +13,16 @@ filler/pace stats, model-answer rewrites) — the part users pay for.
 
 Everything runs on free tiers: no GPU, no OpenAI, no Cartesia.
 
-Mobile wire protocol (unchanged):
-  client -> server : audio_chunk {data}, turn_end, interrupt, session_end
-  server -> client : session_ready, tts_chunk {data}, tts_done, tts_stop,
-                     session_feedback {report}, session_summary, error
-Audio: PCM float32 LE, 24 kHz mono, base64 on the wire.
+Mobile wire protocol:
+  client -> server : binary PCM frames (fast path) OR audio_chunk {data} JSON,
+                     turn_end, interrupt, session_end
+  server -> client : session_ready, ai_text, user_text, tts_done, tts_stop,
+                     correction_card, pronunciation, session_feedback {report},
+                     session_summary, error; TTS audio is sent as BINARY PCM
+                     frames (float32 LE, 24 kHz mono). The base64 tts_chunk JSON
+                     form is accepted by older clients.
+Audio: PCM float32 LE, 24 kHz mono. Client->server may send raw binary frames
+       (preferred) or base64 in audio_chunk JSON.
 """
 
 import asyncio
@@ -53,13 +58,17 @@ router = APIRouter()
 logger = logging.getLogger("echo.ws")
 
 SENTENCE_ENDS = {".", "!", "?"}
-MIN_SENTENCE_LEN = 25
+MIN_SENTENCE_LEN = 12      # flush once a clause reaches this length
+FLUSH_PUNCT_MIN = 6        # punctuation flush threshold (first audio goes out sooner)
+FLUSH_STALL_MS = 150       # flush after this much model silence (with >= 8 chars)
 
 # ── Abuse / resource limits (protect free-tier quotas and server memory) ──────
 MAX_AUDIO_BUFFER_BYTES = 15 * 1024 * 1024        # 15 MB per turn — beyond this the turn is dropped
 MAX_SESSION_SECONDS = int(os.environ.get("MAX_SESSION_SECONDS", "1800"))   # 30 min auto-end
 MAX_TURNS_PER_SESSION = int(os.environ.get("MAX_TURNS_PER_SESSION", "100"))
 MAX_SESSIONS_PER_DAY = int(os.environ.get("MAX_SESSIONS_PER_DAY", "30"))   # per user
+# Cap the expensive audio-native delivery sidecar per session (see ws handler).
+MAX_DELIVERY_ANALYSES = int(os.environ.get("MAX_DELIVERY_ANALYSES", "3"))
 
 
 async def send_json(ws: WebSocket, data: dict):
@@ -242,6 +251,10 @@ async def websocket_session(
     # Gemma 4 audio-native delivery analysis (sidecar — never blocks the reply).
     delivery_notes: list[dict] = []
     tip_state = {"turn": 0, "last_tip_turn": -2}
+    # Budget for the audio-native sidecar: skip very short utterances (Whisper
+    # noise) and cap how many analyses a session can run, so a chatty session
+    # can't burn the free audio-model quota or steal bandwidth from live turns.
+    delivery_budget = {"used": 0}
     # Proactive silence nudge bookkeeping.
     nudge_state = {"last_ai_done": 0.0, "nudged": False}
 
@@ -279,13 +292,23 @@ async def websocket_session(
 
         worker = asyncio.create_task(tts_worker())
         try:
+            last_emit = time.time()
             async for token in stream_conversation(system_prompt, history, user_message, usage_sink=llm_usage):
                 if not speaking["on"]:
                     break
                 sentence_buf += token
                 full += token
-                if any(sentence_buf.rstrip().endswith(e) for e in SENTENCE_ENDS) and len(sentence_buf.strip()) >= MIN_SENTENCE_LEN:
-                    chunk, sentence_buf = sentence_buf.strip(), ""
+                now = time.time()
+                stripped = sentence_buf.strip()
+                ends_punct = any(sentence_buf.rstrip().endswith(e) for e in SENTENCE_ENDS)
+                # Earliest-first-audio: flush on punctuation once a clause is long
+                # enough, or when the model stalls briefly on a decent clause
+                # (token pacing) so the first sentence never waits for a full stop.
+                if (ends_punct and len(stripped) >= FLUSH_PUNCT_MIN) or (
+                    (now - last_emit) * 1000.0 > FLUSH_STALL_MS and len(stripped) >= 8
+                ):
+                    chunk, sentence_buf = stripped, ""
+                    last_emit = now
                     queue.put_nowait(chunk)
             if speaking["on"] and sentence_buf.strip():
                 queue.put_nowait(sentence_buf.strip())
@@ -324,7 +347,12 @@ async def websocket_session(
             if not speaking["on"]:
                 return False
             if audio_chunk:
-                await send_json(websocket, {"type": "tts_chunk", "data": _b64(audio_chunk)})
+                # Binary frame: raw PCM F32LE 24 kHz mono. Smaller than base64
+                # JSON and needs no parse on the client.
+                try:
+                    await websocket.send_bytes(audio_chunk)
+                except Exception:
+                    return False
         return True
 
     async def stop_speaking() -> None:
@@ -463,7 +491,10 @@ async def websocket_session(
                         if not speaking["on"]:
                             break
                         if chunk:
-                            await send_json(websocket, {"type": "tts_chunk", "data": _b64(chunk)})
+                            try:
+                                await websocket.send_bytes(chunk)
+                            except Exception:
+                                break
                     if speaking["on"]:
                         await send_json(websocket, {"type": "tts_done"})
                 except Exception:
@@ -478,11 +509,12 @@ async def websocket_session(
         t_fb = time.time()
         # Briefly let in-flight audio analyses land, but keep ending snappy —
         # a long wait here is what made "End" feel slow. Earlier turns' analyses
-        # have usually already completed during the conversation.
+        # have usually already completed during the conversation; the budget cap
+        # means there are at most a handful of tasks to drain.
         if analysis_tasks:
             try:
                 await asyncio.wait_for(
-                    asyncio.gather(*analysis_tasks, return_exceptions=True), timeout=2.0)
+                    asyncio.gather(*analysis_tasks, return_exceptions=True), timeout=1.2)
             except asyncio.TimeoutError:
                 pass
         fb_usage: dict = {}
@@ -562,8 +594,19 @@ async def websocket_session(
         gen_task = asyncio.create_task(speak_ai_turn(None))
 
         while True:
-            raw = await websocket.receive_text()
-            msg = json.loads(raw)
+            packet = await websocket.receive()
+            # Binary frame = raw PCM (fast path, no base64/JSON overhead).
+            if packet.get("bytes") is not None:
+                if len(audio_buffer) < MAX_AUDIO_BUFFER_BYTES:
+                    audio_buffer.extend(packet["bytes"])
+                continue
+            raw = packet.get("text") or ""
+            if not raw:
+                continue
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
             msg_type = msg.get("type")
 
             if msg_type == "audio_chunk":
@@ -637,8 +680,15 @@ async def websocket_session(
                 # Delivery/pronunciation analysis runs in parallel (never blocks
                 # the reply). Grammar correction is now handled by the coach
                 # inside its spoken reply, so no correction cards are sent.
-                analysis_tasks.append(asyncio.create_task(
-                    run_delivery_analysis(audio_bytes, stt.duration_sec, transcript)))
+                # Gate: skip sub-2s utterances (noise) and cap per-session runs.
+                if stt.duration_sec >= 2.0 and delivery_budget["used"] < MAX_DELIVERY_ANALYSES:
+                    delivery_budget["used"] += 1
+                    t = asyncio.create_task(
+                        run_delivery_analysis(audio_bytes, stt.duration_sec, transcript))
+                    # Fire-and-forget: swallow any exception so a sidecar failure
+                    # can never surface as a session error.
+                    t.add_done_callback(lambda _t: None)
+                    analysis_tasks.append(t)
                 gen_task = asyncio.create_task(speak_ai_turn(None))
 
             elif msg_type == "interrupt":

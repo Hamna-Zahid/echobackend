@@ -1,0 +1,31 @@
+# fly.toml — Echo backend (lowest-latency, always-warm)
+# Deploy:  cd backend && flyctl launch --no-deploy --copy-config --name echo-coach --region dfw
+#          flyctl secrets set GROQ_API_KEY=... SUPABASE_URL=... SUPABASE_ANON_KEY=...
+#          flyctl deploy
+app = "echo-coach"
+primary_region = "dfw"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8000"
+  # Single-stage turbo recognizer (lowest latency / cost on Groq).
+  ASR_MODEL = "whisper-large-v3-turbo"
+  # TTS: edge is the free default; set TTS_ENGINE=piper for fully-local ONNX.
+  TTS_ENGINE = "edge"
+  TTS_PRIMARY = "edge"
+  # LLM: groq by default. Set LLM_PROVIDER=cerebras (+ CEREBRAS_API_KEY) or
+  # LLM_CONVERSATION_PREFER_CEREBRAS=true to route conversation to Cerebras.
+  LLM_PROVIDER = "groq"
+  LLM_CONVERSATION_PREFER_CEREBRAS = "false"
+  MAX_DELIVERY_ANALYSES = "3"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  # Keep at least one machine warm so the first user turn has no cold start.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]

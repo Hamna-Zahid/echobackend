@@ -53,10 +53,11 @@ async def main():
 
     print("\n== Feedback generation (mocked LLM) ==")
     import services.feedback as fb
-    async def fake_json(system, payload):
+    async def fake_json(system, payload, *args, **kwargs):
         return {"overall_score": 72, "headline": "Solid, tighten structure",
                 "delivery": {"pace_wpm": 999, "filler_count": 999}, "strengths": ["clear"]}
     fb.generate_feedback_json = fake_json
+
     report = await generate_session_feedback("interview", turns * 5, m)  # enough words
     check("report returned", report is not None)
     check("measured wpm overrides LLM guess", report["delivery"]["pace_wpm"] == 150)
@@ -77,6 +78,41 @@ async def main():
     no_key = await analyze_delivery(b"RIFF" + b"\x00" * 500, 10.0)  # GEMINI_API_KEY unset
     check("no key -> graceful None (degrades)", no_key is None)
 
+    print("\n== Character Prompts & Personas ==")
+    from prompts.characters import build_character_prompt, CHARACTERS
+    check("CHARACTERS registry has alex_swe", "alex_swe" in CHARACTERS)
+    check("CHARACTERS registry has marcus_vc", "marcus_vc" in CHARACTERS)
+    check("CHARACTERS registry has elena_pm", "elena_pm" in CHARACTERS)
+    check("CHARACTERS registry has sophia_ted", "sophia_ted" in CHARACTERS)
+    check("CHARACTERS registry has maya_hr", "maya_hr" in CHARACTERS)
+    check("CHARACTERS registry has liam_consultant", "liam_consultant" in CHARACTERS)
+    check("CHARACTERS registry has chloe_sales", "chloe_sales" in CHARACTERS)
+    check("CHARACTERS registry has noah_academic", "noah_academic" in CHARACTERS)
+    check("CHARACTERS registry has serena_debate", "serena_debate" in CHARACTERS)
+    check("CHARACTERS registry has zara_accent", "zara_accent" in CHARACTERS)
+    check("CHARACTERS registry has dr_oliver", "dr_oliver" in CHARACTERS)
+
+    alex_p = build_character_prompt(character_id="alex_swe")
+    check("Alex prompt contains STAR guidance", "STAR" in alex_p)
+
+    marcus_p = build_character_prompt(character_id="marcus_vc")
+    check("Marcus prompt contains pitch guidance", "pitch" in marcus_p.lower())
+
+    oliver_p = build_character_prompt(character_id="dr_oliver")
+    check("Dr. Oliver prompt contains anxiety guidance", "anxiety" in oliver_p.lower() or "breathing" in oliver_p.lower())
+
+    custom_p = build_character_prompt(scenario="Mock presentation for Stanford Demo Day")
+    check("Custom prompt incorporates scenario", "Stanford Demo Day" in custom_p)
+
+
+    print("\n== STT Container & WAV Wrapping ==")
+    from services.stt import _wrap_pcm_as_wav, _sniff_container
+    fake_pcm = b"\x00\x00" * 8000
+    wrapped_wav = _wrap_pcm_as_wav(fake_pcm, sample_rate=16000)
+    check("wrapped WAV starts with RIFF", wrapped_wav[:4] == b"RIFF")
+    check("sniff container identifies wrapped wav", _sniff_container(wrapped_wav) == "wav")
+    check("sniff container handles m4a signature", _sniff_container(b"\x00\x00\x00\x18ftypM4A ") == "m4a")
+
     print("\n== Edge TTS (FREE, real) ==")
     try:
         from services.tts import stream_tts
@@ -94,3 +130,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+

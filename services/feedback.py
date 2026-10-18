@@ -32,9 +32,19 @@ def compute_delivery_metrics(
 
 
 def _format_transcript(turns: list[dict], mode: str) -> str:
-    speaker = {"interview": ("Interviewer", "Candidate"),
-               "speech": ("Coach", "Speaker"),
-               "professional": ("Colleague", "You")}.get(mode, ("Coach", "You"))
+    speaker_map = {
+        "interview": ("Interviewer", "Candidate"),
+        "alex_swe": ("Interviewer (Alex)", "Candidate"),
+        "elena_pm": ("VP of Product (Elena)", "Candidate"),
+        "pitch": ("Investor (Marcus)", "Founder"),
+        "marcus_vc": ("Investor (Marcus)", "Founder"),
+        "speech": ("Coach (Sophia)", "Speaker"),
+        "sophia_ted": ("Coach (Sophia)", "Speaker"),
+        "david_speech": ("Speech Coach (David)", "Speaker"),
+        "presentation": ("Coach", "Speaker"),
+        "professional": ("Colleague", "You"),
+    }
+    speaker = speaker_map.get(mode, ("Coach", "You"))
     lines = []
     for t in turns:
         who = speaker[0] if t.get("role") == "assistant" else speaker[1]
@@ -42,6 +52,7 @@ def _format_transcript(turns: list[dict], mode: str) -> str:
         if content:
             lines.append(f"{who}: {content}")
     return "\n".join(lines)
+
 
 
 async def generate_session_feedback(
